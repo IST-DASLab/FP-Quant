@@ -16,7 +16,7 @@ setup(
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
     ],
-    python_requires=">=3.11",
+    python_requires=">=3.10",
     install_requires=[
         "torch>=2.7.0",
         "scipy>=1.13.0",
