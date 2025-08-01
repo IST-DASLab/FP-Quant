@@ -196,7 +196,7 @@ class FPQuantLinear(nn.Module):
             self.scales = None
             return
 
-        if not self.pseudoquantization and self.config.dtype == FPQuantDtype.MXFP4:
+        if not self.config.pseudoquantization and self.config.forward_dtype == FPQuantDtype.MXFP4:
             weight_q, scales, _ = forward_quantize(
                 self.weight,
                 self.forward_hadamard_matrix,

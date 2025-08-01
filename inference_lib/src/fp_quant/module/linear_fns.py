@@ -40,7 +40,7 @@ def _(x_flat, hadamard_matrix, forward_method):
 
 @torch.library.custom_op("fp_quant::matmul_mxf4_bf16_tn_op", mutates_args=())
 def matmul_mxf4_bf16_tn_op(
-    x: torch.Tensor, w: torch.Tensor, xs: torch.Tensor, ws: torch.Tensor, alpha: float
+    x: torch.Tensor, w: torch.Tensor, xs: torch.Tensor, ws: torch.Tensor, alpha: torch.Tensor
 ) -> torch.Tensor:
     return matmul_mxf4_bf16_tn(
         x, w, to_blocked(xs), to_blocked(ws).view(torch.float8_e8m0fnu), alpha
@@ -54,7 +54,7 @@ def _(x, w, xs, ws, alpha):
 
 @torch.library.custom_op("fp_quant::matmul_ada_mxf4_bf16_tn_op", mutates_args=())
 def matmul_ada_mxf4_bf16_tn_op(
-    x: torch.Tensor, w: torch.Tensor, xs: torch.Tensor, ws: torch.Tensor, alpha: float
+    x: torch.Tensor, w: torch.Tensor, xs: torch.Tensor, ws: torch.Tensor, alpha: torch.Tensor
 ) -> torch.Tensor:
     return matmul_ada_mxf4_bf16_tn(x, w, xs, ws.view(torch.float8_e8m0fnu), alpha)
 
@@ -134,6 +134,8 @@ def forward_quantize(
 
 
 def forward_gemm(x_q, w_q, x_scales, w_scales, alpha):
+    if isinstance(alpha, float):
+        alpha = torch.tensor(alpha, dtype=torch.float32)
     if x_q.shape[0] <= 64:
         return matmul_ada_mxf4_bf16_tn_op(x_q, w_q, x_scales, w_scales, alpha)
     else:
