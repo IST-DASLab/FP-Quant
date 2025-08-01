@@ -12,7 +12,7 @@ from .triton.nvfp4 import nvfp4_forward_kernel_wrapper
 def forward_pseudoquantize(
     x: torch.Tensor,
     hadamard_matrix: torch.Tensor,
-    global_scale: Optional[torch.Tensor],
+    global_scale: torch.Tensor,
     dtype: FPQuantDtype,
     forward_method: str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -59,9 +59,10 @@ class PseudoQuant4x16MasterFn(Function):
         ctx,
         x: torch.Tensor,
         weight: torch.Tensor,
+        weight_global_scale: torch.Tensor,
+        act_global_scale: torch.Tensor,
         bias: Optional[torch.Tensor],
         forward_hadamard_matrix: torch.Tensor,
-        global_scale: Optional[torch.Tensor],
         dtype: FPQuantDtype,
         forward_method: str,
     ):
@@ -69,12 +70,12 @@ class PseudoQuant4x16MasterFn(Function):
 
         # Pseudoquantize input
         x_flat_dq, x_flat_mask = forward_pseudoquantize(
-            x_flat, forward_hadamard_matrix, global_scale, dtype, forward_method
+            x_flat, forward_hadamard_matrix, act_global_scale, dtype, forward_method
         )
 
         # Pseudoquantize weights
         weight_dq, weight_mask = forward_pseudoquantize(
-            weight, forward_hadamard_matrix, global_scale, dtype, forward_method
+            weight, forward_hadamard_matrix, weight_global_scale, dtype, forward_method
         )
 
         y = torch.nn.functional.linear(x_flat_dq, weight_dq, bias)
@@ -133,9 +134,10 @@ class PseudoQuant4x16NoMasterFn(Function):
         ctx,
         x: torch.Tensor,
         weight_dq: torch.Tensor,
+        weight_global_scale: torch.Tensor,
+        act_global_scale: torch.Tensor,
         bias: Optional[torch.Tensor],
         forward_hadamard_matrix: torch.Tensor,
-        global_scale: Optional[torch.Tensor],
         dtype: FPQuantDtype,
         forward_method: str,
     ):
@@ -143,7 +145,7 @@ class PseudoQuant4x16NoMasterFn(Function):
 
         # Pseudoquantize input
         x_flat_dq, x_flat_mask = forward_pseudoquantize(
-            x_flat, forward_hadamard_matrix, global_scale, dtype, forward_method
+            x_flat, forward_hadamard_matrix, act_global_scale, dtype, forward_method
         )
 
         y = torch.nn.functional.linear(x_flat_dq, weight_dq, bias)
@@ -172,7 +174,6 @@ class PseudoQuant4x16NoMasterFn(Function):
         grad_output_flat = grad_output.flatten(end_dim=-2)
 
         grad_input = torch.einsum("...j,ji->...i", grad_output_flat, weight_dq)
-        x_flat_mask = _unpack_mask(x_flat_mask)
         grad_input = (
             (grad_input.view(-1, 32) * x_flat_mask.view(-1, 32).to(grad_input.dtype))
             @ forward_hadamard_matrix.T
