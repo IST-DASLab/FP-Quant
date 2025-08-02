@@ -56,7 +56,7 @@ def matmul_mxf4_bf16_tn_op(
     alpha: torch.Tensor,
 ) -> torch.Tensor:
     return matmul_mxf4_bf16_tn(
-        x, w, to_blocked(xs), to_blocked(ws).view(torch.float8_e8m0fnu), alpha.cpu()
+        x, w, to_blocked(xs), to_blocked(ws).view(torch.float8_e8m0fnu), alpha
     )
 
 
