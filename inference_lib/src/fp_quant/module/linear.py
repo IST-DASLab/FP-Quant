@@ -104,7 +104,7 @@ class FPQuantLinear(nn.Module):
         self.register_buffer(
             "weight_global_scale",
             torch.empty(
-                1,
+                [],
                 dtype=torch.float32,
                 device=self.weight.device,
             ),
@@ -112,7 +112,7 @@ class FPQuantLinear(nn.Module):
         self.register_buffer(
             "act_global_scale",
             torch.empty(
-                1,
+                [],
                 dtype=torch.float32,
                 device=self.weight.device,
             ),
@@ -165,26 +165,18 @@ class FPQuantLinear(nn.Module):
         if self.config.forward_dtype == FPQuantDtype.MXFP4:
             # MXFP4 quantization implicitly multiplies by 3.0
             self.weight_global_scale = nn.Parameter(
-                torch.tensor(
-                    [1.0 / 3.0], dtype=torch.float32, device=self.weight.device
-                )
+                torch.tensor(1.0 / 3.0, dtype=torch.float32, device=self.weight.device)
             )
             self.act_global_scale = nn.Parameter(
-                torch.tensor(
-                    [1.0 / 3.0], dtype=torch.float32, device=self.weight.device
-                )
+                torch.tensor(1.0 / 3.0, dtype=torch.float32, device=self.weight.device)
             )
         elif self.config.forward_dtype == FPQuantDtype.NVFP4:
             # MXFP4 quantization implicitly multiplies by 6.0
             self.weight_global_scale = nn.Parameter(
-                torch.tensor(
-                    [1.0 / 6.0], dtype=torch.float32, device=self.weight.device
-                )
+                torch.tensor(1.0, dtype=torch.float32, device=self.weight.device)
             )
             self.act_global_scale = nn.Parameter(
-                torch.tensor(
-                    [1.0 / 6.0], dtype=torch.float32, device=self.weight.device
-                )
+                torch.tensor(1.0, dtype=torch.float32, device=self.weight.device)
             )
 
         if self.config.store_master_weights:

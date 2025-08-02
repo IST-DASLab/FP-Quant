@@ -26,13 +26,12 @@ def fused_quantize_mx_op(
     x_flat: torch.Tensor,
     hadamard_matrix: torch.Tensor,
     forward_method: str,
-    global_scale: Optional[torch.Tensor],
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     return fusedQuantizeMx(x_flat, hadamard_matrix, method=forward_method)
 
 
 @fused_quantize_mx_op.register_fake
-def _(x_flat, hadamard_matrix, forward_method, global_scale):
+def _(x_flat, hadamard_matrix, forward_method):
     rows, cols = x_flat.size(0), x_flat.size(1) // 32
     padded_rows = ((rows + 128 - 1) // 128) * 128
     padded_cols = ((cols + 4 - 1) // 4) * 4
@@ -56,7 +55,7 @@ def matmul_mxf4_bf16_tn_op(
     alpha: torch.Tensor,
 ) -> torch.Tensor:
     return matmul_mxf4_bf16_tn(
-        x, w, to_blocked(xs), to_blocked(ws).view(torch.float8_e8m0fnu), alpha
+        x, w, to_blocked(xs), to_blocked(ws).view(torch.float8_e8m0fnu), alpha.float()
     )
 
 
@@ -73,7 +72,9 @@ def matmul_ada_mxf4_bf16_tn_op(
     ws: torch.Tensor,
     alpha: torch.Tensor,
 ) -> torch.Tensor:
-    return matmul_ada_mxf4_bf16_tn(x, w, xs, ws.view(torch.float8_e8m0fnu), alpha.cpu())
+    return matmul_ada_mxf4_bf16_tn(
+        x, w, xs, ws.view(torch.float8_e8m0fnu), alpha.cpu().float()
+    )
 
 
 @matmul_ada_mxf4_bf16_tn_op.register_fake
@@ -85,9 +86,9 @@ def _(x, w, xs, ws, alpha):
 def fused_quantize_nv_op(
     x_flat: torch.Tensor,
     hadamard_matrix: torch.Tensor,
-    global_scale: Optional[torch.Tensor],
+    global_scale: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    return fusedQuantizeNv(x_flat, hadamard_matrix)
+    return fusedQuantizeNv(x_flat, hadamard_matrix, global_scale.float())
 
 
 @fused_quantize_nv_op.register_fake
@@ -120,7 +121,7 @@ def matmul_nvf4_bf16_tn_op(
     alpha: torch.Tensor,
 ) -> torch.Tensor:
     return matmul_nvf4_bf16_tn(
-        x, w, to_blocked(xs), to_blocked(ws.view(torch.float8_e4m3fn)), alpha
+        x, w, to_blocked(xs), to_blocked(ws.view(torch.float8_e4m3fn)), alpha.float()
     )
 
 
@@ -139,7 +140,9 @@ def forward_quantize(
     match dtype:
         case FPQuantDtype.MXFP4:
             qweight, scales = fused_quantize_mx_op(
-                x, hadamard_matrix, forward_method, global_scale
+                x,
+                hadamard_matrix,
+                forward_method,
             )
             return qweight, scales, None  # TODO: add mask
         case FPQuantDtype.NVFP4:
