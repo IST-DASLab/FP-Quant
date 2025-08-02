@@ -6,6 +6,7 @@ from typing import Literal
 class FPQuantDtype(Enum):
     MXFP8 = "mxfp8"
     MXFP4 = "mxfp4"
+    NVFP4 = "nvfp4"
     BF16 = "bf16"
 
 
