@@ -31,7 +31,6 @@ def forward_pseudoquantize(
                 x,
                 hadamard_matrix,
                 return_clip_mask=True,
-                stochastic_round=False,
                 quest=quest,
                 gaussian_scale=gaussian_scale,
             )
