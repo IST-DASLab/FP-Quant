@@ -194,7 +194,7 @@ class FPQuant4x16MasterFn(Function):
             weight_q,
             x_flat_scales,
             weight_scales,
-            weight_global_scale * act_global_scale,
+            1.0 / (weight_global_scale * act_global_scale),
             dtype,
         )
 
@@ -251,7 +251,7 @@ class FPQuant4x16NoMasterFn(Function):
             weight_q,
             x_flat_scales,
             weight_scales,
-            weight_global_scale * act_global_scale,
+            1.0 / (weight_global_scale * act_global_scale),
             dtype,
         )
 
