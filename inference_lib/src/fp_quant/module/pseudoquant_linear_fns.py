@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 from torch import nn
@@ -15,40 +15,37 @@ def forward_pseudoquantize(
     global_scale: torch.Tensor,
     dtype: FPQuantDtype,
     forward_method: str,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    match dtype:
-        case FPQuantDtype.MXFP4:
-            if forward_method == "quest":
-                gaussian_scale = 2.92247856 / 6.0
-                quest = True
-            elif forward_method == "abs_max":
-                gaussian_scale = 3.0 / 4.0
-                quest = False
-            else:
-                raise ValueError(f"Unsupported forward method: {forward_method}")
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if dtype == FPQuantDtype.MXFP4:
+        if forward_method == "quest":
+            gaussian_scale = 2.92247856 / 6.0
+            quest = True
+        elif forward_method == "abs_max":
+            gaussian_scale = 3.0 / 4.0
+            quest = False
+        else:
+            raise ValueError(f"Unsupported forward method: {forward_method}")
 
-            x_dequantized, mask = mxfp4_forward_kernel_wrapper(
-                x,
-                hadamard_matrix,
-                return_clip_mask=True,
-                quest=quest,
-                gaussian_scale=gaussian_scale,
-            )
-            return x_dequantized, mask
-        case FPQuantDtype.NVFP4:
-            assert forward_method == "abs_max", "NVFP4 only supports abs_max method"
-            x_dequantized = nvfp4_forward_kernel_wrapper(
-                x,
-                hadamard_matrix,
-                global_scale,
-            )
-            return x_dequantized, torch.ones_like(x_dequantized, dtype=torch.bool)
-        case FPQuantDtype.MXFP8:
-            raise NotImplementedError(
-                "MXFP8 is not supported for forward quantization yet"
-            )
-        case _:
-            raise ValueError(f"Unsupported forward dtype: {dtype}")
+        x_dequantized, mask = mxfp4_forward_kernel_wrapper(
+            x,
+            hadamard_matrix,
+            return_clip_mask=True,
+            quest=quest,
+            gaussian_scale=gaussian_scale,
+        )
+        return x_dequantized, mask
+    elif dtype == FPQuantDtype.NVFP4:
+        assert forward_method == "abs_max", "NVFP4 only supports abs_max method"
+        x_dequantized = nvfp4_forward_kernel_wrapper(
+            x,
+            hadamard_matrix,
+            global_scale,
+        )
+        return x_dequantized, torch.ones_like(x_dequantized, dtype=torch.bool)
+    elif dtype == FPQuantDtype.MXFP8:
+        raise NotImplementedError("MXFP8 is not supported for forward quantization yet")
+    else:
+        raise ValueError(f"Unsupported forward dtype: {dtype}")
 
 
 class PseudoQuant4x16MasterFn(Function):

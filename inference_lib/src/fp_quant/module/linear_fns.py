@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 from torch import nn
@@ -26,7 +26,7 @@ def fused_quantize_mx_op(
     x_flat: torch.Tensor,
     hadamard_matrix: torch.Tensor,
     forward_method: str,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     return fusedQuantizeMx(x_flat, hadamard_matrix, method=forward_method)
 
 
@@ -87,7 +87,7 @@ def fused_quantize_nv_op(
     x_flat: torch.Tensor,
     hadamard_matrix: torch.Tensor,
     global_scale: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     return fusedQuantizeNv(x_flat, hadamard_matrix, global_scale.float())
 
 
@@ -136,20 +136,19 @@ def forward_quantize(
     global_scale: torch.Tensor,
     dtype: FPQuantDtype,
     forward_method: str,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    match dtype:
-        case FPQuantDtype.MXFP4:
-            qweight, scales = fused_quantize_mx_op(
-                x,
-                hadamard_matrix,
-                forward_method,
-            )
-            return qweight, scales, None  # TODO: add mask
-        case FPQuantDtype.NVFP4:
-            qweight, scales = fused_quantize_nv_op(x, hadamard_matrix, global_scale)
-            return qweight, scales, None  # TODO: add mask
-        case _:
-            raise ValueError(f"Unsupported forward dtype: {dtype}")
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if dtype == FPQuantDtype.MXFP4:
+        qweight, scales = fused_quantize_mx_op(
+            x,
+            hadamard_matrix,
+            forward_method,
+        )
+        return qweight, scales, None  # TODO: add mask
+    elif dtype == FPQuantDtype.NVFP4:
+        qweight, scales = fused_quantize_nv_op(x, hadamard_matrix, global_scale)
+        return qweight, scales, None  # TODO: add mask
+    else:
+        raise ValueError(f"Unsupported forward dtype: {dtype}")
 
 
 def forward_gemm(x_q, w_q, x_scales, w_scales, alpha, dtype: FPQuantDtype):

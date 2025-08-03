@@ -58,47 +58,46 @@ class FPQuantLinear(nn.Module):
         self.config = config
 
         # Quantized tensors buffers
-        match self.config.forward_dtype:
-            case FPQuantDtype.MXFP4:
-                self.register_buffer(
-                    "qweight",
-                    torch.empty(
-                        self.weight.shape[0],
-                        self.weight.shape[1] // 2,
-                        dtype=torch.uint8,
-                        device=self.weight.device,
-                    ),
-                )
-                self.register_buffer(
-                    "scales",
-                    torch.empty(
-                        self.weight.shape[0],
-                        self.weight.shape[1] // 32,
-                        dtype=torch.uint8,
-                        device=self.weight.device,
-                    ),
-                )
-            case FPQuantDtype.NVFP4:
-                self.register_buffer(
-                    "qweight",
-                    torch.empty(
-                        self.weight.shape[0],
-                        self.weight.shape[1] // 2,
-                        dtype=torch.uint8,
-                        device=self.weight.device,
-                    ),
-                )
-                self.register_buffer(
-                    "scales",
-                    torch.empty(
-                        self.weight.shape[0],
-                        self.weight.shape[1] // 16,
-                        dtype=torch.uint8,
-                        device=self.weight.device,
-                    ),
-                )
-            case _:
-                raise ValueError(f"Unsupported forward dtype: {config.forward_dtype}")
+        if self.config.forward_dtype == FPQuantDtype.MXFP4:
+            self.register_buffer(
+                "qweight",
+                torch.empty(
+                    self.weight.shape[0],
+                    self.weight.shape[1] // 2,
+                    dtype=torch.uint8,
+                    device=self.weight.device,
+                ),
+            )
+            self.register_buffer(
+                "scales",
+                torch.empty(
+                    self.weight.shape[0],
+                    self.weight.shape[1] // 32,
+                    dtype=torch.uint8,
+                    device=self.weight.device,
+                ),
+            )
+        elif self.config.forward_dtype == FPQuantDtype.NVFP4:
+            self.register_buffer(
+                "qweight",
+                torch.empty(
+                    self.weight.shape[0],
+                    self.weight.shape[1] // 2,
+                    dtype=torch.uint8,
+                    device=self.weight.device,
+                ),
+            )
+            self.register_buffer(
+                "scales",
+                torch.empty(
+                    self.weight.shape[0],
+                    self.weight.shape[1] // 16,
+                    dtype=torch.uint8,
+                    device=self.weight.device,
+                ),
+            )
+        else:
+            raise ValueError(f"Unsupported forward dtype: {config.forward_dtype}")
 
         # Global scale buffers
         self.register_buffer(
@@ -211,78 +210,72 @@ class FPQuantLinear(nn.Module):
             self.dqweight = None
 
     def forward(self, x) -> torch.Tensor:
-        match (
-            self.config.forward_dtype,
-            self.config.backward_dtype,
-            self.config.store_master_weights,
-            self.config.pseudoquantization,
+        if (
+            self.config.forward_dtype in (FPQuantDtype.MXFP4, FPQuantDtype.NVFP4)
+            and self.config.backward_dtype == FPQuantDtype.BF16
+            and self.config.store_master_weights == True
+            and self.config.pseudoquantization == False
         ):
-            case (
-                FPQuantDtype.MXFP4 | FPQuantDtype.NVFP4,
-                FPQuantDtype.BF16,
-                True,
-                False,
-            ):
-                return FPQuant4x16MasterFn.apply(
-                    x,
-                    self.weight,
-                    self.weight_global_scale,
-                    self.act_global_scale,
-                    self.bias,
-                    self.forward_hadamard_matrix,
-                    self.config.forward_dtype,
-                    self.config.forward_method,
-                )
-            case (
-                FPQuantDtype.MXFP4 | FPQuantDtype.NVFP4,
-                FPQuantDtype.BF16,
-                False,
-                False,
-            ):
-                return FPQuant4x16NoMasterFn.apply(
-                    x,
-                    self.qweight,
-                    self.scales,
-                    self.weight_global_scale,
-                    self.act_global_scale,
-                    self.bias,
-                    self.forward_hadamard_matrix,
-                    self.config.forward_dtype,
-                    self.config.forward_method,
-                )
-            case (
-                FPQuantDtype.MXFP4 | FPQuantDtype.NVFP4,
-                FPQuantDtype.BF16,
-                True,
-                True,
-            ):
-                return PseudoQuant4x16MasterFn.apply(
-                    x,
-                    self.dqweight,
-                    self.weight_global_scale,
-                    self.act_global_scale,
-                    self.bias,
-                    self.forward_hadamard_matrix,
-                    self.config.forward_dtype,
-                    self.config.forward_method,
-                )
-            case (
-                FPQuantDtype.MXFP4 | FPQuantDtype.NVFP4,
-                FPQuantDtype.BF16,
-                False,
-                True,
-            ):
-                return PseudoQuant4x16NoMasterFn.apply(
-                    x,
-                    self.dqweight,
-                    self.weight_global_scale,
-                    self.act_global_scale,
-                    self.bias,
-                    self.forward_hadamard_matrix,
-                    self.config.forward_dtype,
-                    self.config.forward_method,
-                )
-            case _:
-                raise ValueError(
-                    f"Forward dtype: {self.config.forward_dtype}, backward dtype: {self.config.backward_dtype}, store_master_weights: {self.config.store_master_weights}, pseudoquantization: {self.config.pseudoquantization} isn't supported yet."
-                )
+            return FPQuant4x16MasterFn.apply(
+                x,
+                self.weight,
+                self.weight_global_scale,
+                self.act_global_scale,
+                self.bias,
+                self.forward_hadamard_matrix,
+                self.config.forward_dtype,
+                self.config.forward_method,
+            )
+        elif (
+            self.config.forward_dtype in (FPQuantDtype.MXFP4, FPQuantDtype.NVFP4)
+            and self.config.backward_dtype == FPQuantDtype.BF16
+            and self.config.store_master_weights == False
+            and self.config.pseudoquantization == False
+        ):
+            return FPQuant4x16NoMasterFn.apply(
+                x,
+                self.qweight,
+                self.scales,
+                self.weight_global_scale,
+                self.act_global_scale,
+                self.bias,
+                self.forward_hadamard_matrix,
+                self.config.forward_dtype,
+                self.config.forward_method,
+            )
+        elif (
+            self.config.forward_dtype in (FPQuantDtype.MXFP4, FPQuantDtype.NVFP4)
+            and self.config.backward_dtype == FPQuantDtype.BF16
+            and self.config.store_master_weights == True
+            and self.config.pseudoquantization == True
+        ):
+            return PseudoQuant4x16MasterFn.apply(
+                x,
+                self.dqweight,
+                self.weight_global_scale,
+                self.act_global_scale,
+                self.bias,
+                self.forward_hadamard_matrix,
+                self.config.forward_dtype,
+                self.config.forward_method,
+            )
+        elif (
+            self.config.forward_dtype in (FPQuantDtype.MXFP4, FPQuantDtype.NVFP4)
+            and self.config.backward_dtype == FPQuantDtype.BF16
+            and self.config.store_master_weights == False
+            and self.config.pseudoquantization == True
+        ):
+            return PseudoQuant4x16NoMasterFn.apply(
+                x,
+                self.dqweight,
+                self.weight_global_scale,
+                self.act_global_scale,
+                self.bias,
+                self.forward_hadamard_matrix,
+                self.config.forward_dtype,
+                self.config.forward_method,
+            )
+        else:
+            raise ValueError(
+                f"Forward dtype: {self.config.forward_dtype}, backward dtype: {self.config.backward_dtype}, store_master_weights: {self.config.store_master_weights}, pseudoquantization: {self.config.pseudoquantization} isn't supported yet."
+            )
