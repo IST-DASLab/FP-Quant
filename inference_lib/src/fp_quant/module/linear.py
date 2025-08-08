@@ -251,7 +251,7 @@ class FPQuantLinear(nn.Module):
         ):
             return PseudoQuant4x16MasterFn.apply(
                 x,
-                self.dqweight,
+                self.weight,
                 self.weight_global_scale,
                 self.act_global_scale,
                 self.bias,
@@ -267,7 +267,7 @@ class FPQuantLinear(nn.Module):
         ):
             return PseudoQuant4x16NoMasterFn.apply(
                 x,
-                self.dqweight,
+                self.weight,
                 self.weight_global_scale,
                 self.act_global_scale,
                 self.bias,

@@ -50,7 +50,6 @@ def forward_pseudoquantize(
 
 class PseudoQuant4x16MasterFn(Function):
     @staticmethod
-    # @torch.compile()
     def forward(
         ctx,
         x: torch.Tensor,
@@ -92,7 +91,6 @@ class PseudoQuant4x16MasterFn(Function):
         return y
 
     @staticmethod
-    # @torch.compile()
     def backward(ctx, grad_output: torch.Tensor):
         (
             x_flat_dq,
@@ -125,7 +123,6 @@ class PseudoQuant4x16MasterFn(Function):
 
 class PseudoQuant4x16NoMasterFn(Function):
     @staticmethod
-    # @torch.compile()
     def forward(
         ctx,
         x: torch.Tensor,
@@ -163,7 +160,6 @@ class PseudoQuant4x16NoMasterFn(Function):
         return y
 
     @staticmethod
-    # @torch.compile()
     def backward(ctx, grad_output: torch.Tensor):
         _, weight_dq, x_flat_mask, forward_hadamard_matrix = ctx.saved_tensors
 
