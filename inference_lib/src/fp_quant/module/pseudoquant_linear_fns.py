@@ -100,17 +100,25 @@ class PseudoQuant4x16MasterFn(Function):
             forward_hadamard_matrix,
         ) = ctx.saved_tensors
 
+        hadamard_dim = forward_hadamard_matrix.shape[-1]
+
         grad_output_flat = grad_output.flatten(end_dim=-2)
 
         grad_input = torch.einsum("...j,ji->...i", grad_output_flat, weight_dq)
         grad_input = (
-            (grad_input.view(-1, 32) * x_flat_mask.view(-1, 32).to(grad_input.dtype))
+            (
+                grad_input.view(-1, hadamard_dim)
+                * x_flat_mask.view(-1, hadamard_dim).to(grad_input.dtype)
+            )
             @ forward_hadamard_matrix.T
         ).view(ctx.x_shape)
 
         grad_weight = torch.einsum("...j,...i->ji", grad_output_flat, x_flat_dq)
         grad_weight = (
-            (grad_weight.view(-1, 32) * weight_mask.view(-1, 32).to(grad_weight.dtype))
+            (
+                grad_weight.view(-1, hadamard_dim)
+                * weight_mask.view(-1, hadamard_dim).to(grad_weight.dtype)
+            )
             @ forward_hadamard_matrix.T
         ).view(grad_output.size(-1), weight_dq.size(-1))
 
@@ -118,7 +126,7 @@ class PseudoQuant4x16MasterFn(Function):
             grad_output.flatten(end_dim=-2).sum(dim=0) if ctx.bias_present else None
         )
 
-        return grad_input, grad_weight, grad_bias, None, None, None
+        return grad_input, grad_weight, None, None, grad_bias, None, None, None
 
 
 class PseudoQuant4x16NoMasterFn(Function):
@@ -163,11 +171,16 @@ class PseudoQuant4x16NoMasterFn(Function):
     def backward(ctx, grad_output: torch.Tensor):
         _, weight_dq, x_flat_mask, forward_hadamard_matrix = ctx.saved_tensors
 
+        hadamard_dim = forward_hadamard_matrix.shape[-1]
+
         grad_output_flat = grad_output.flatten(end_dim=-2)
 
         grad_input = torch.einsum("...j,ji->...i", grad_output_flat, weight_dq)
         grad_input = (
-            (grad_input.view(-1, 32) * x_flat_mask.view(-1, 32).to(grad_input.dtype))
+            (
+                grad_input.view(-1, hadamard_dim)
+                * x_flat_mask.view(-1, hadamard_dim).to(grad_input.dtype)
+            )
             @ forward_hadamard_matrix.T
         ).view(ctx.x_shape)
 
@@ -175,4 +188,4 @@ class PseudoQuant4x16NoMasterFn(Function):
             grad_output.flatten(end_dim=-2).sum(dim=0) if ctx.bias_present else None
         )
 
-        return grad_input, None, None, grad_bias, None, None, None
+        return grad_input, None, None, None, grad_bias, None, None, None
