@@ -104,16 +104,14 @@ class FPQuantLinear(nn.Module):
             "weight_global_scale",
             torch.empty(
                 1,
-                dtype=torch.float32,
-                device=self.weight.device,
+                **factory_kwargs,
             ),
         )
         self.register_buffer(
             "act_global_scale",
             torch.empty(
                 1,
-                dtype=torch.float32,
-                device=self.weight.device,
+                **factory_kwargs,
             ),
         )
 
@@ -123,8 +121,7 @@ class FPQuantLinear(nn.Module):
             torch.empty(
                 self.config.hadamard_group_size,
                 self.config.hadamard_group_size,
-                dtype=self.weight.dtype,
-                device=self.weight.device,
+                **factory_kwargs,
             ),
         )
         self.register_buffer(
@@ -132,8 +129,7 @@ class FPQuantLinear(nn.Module):
             torch.empty(
                 self.config.hadamard_group_size,
                 self.config.hadamard_group_size,
-                dtype=self.weight.dtype,
-                device=self.weight.device,
+                **factory_kwargs,
             ),
         )
 
@@ -143,39 +139,50 @@ class FPQuantLinear(nn.Module):
         assert self.weight.shape[1] % self.config.hadamard_group_size == 0, (
             f"Weight shape must be divisible by hadamard group size: {self.weight.shape[1]} % {self.config.hadamard_group_size} = {self.weight.shape[1] % self.config.hadamard_group_size}"
         )
-        assert self.weight.data.is_cuda, (
-            f"Weight must be on CUDA, but is on {self.weight.device}"
-        )
+        if not self.config.pseudoquantization:
+            assert self.weight.data.is_cuda, (
+                f"Weight must be on CUDA, but is on {self.weight.device}"
+            )
         self.forward_hadamard_matrix = nn.Parameter(
             get_hadamard_matrix(
                 self.config.hadamard_group_size,
                 self.weight.dtype,
                 self.weight.device,
-            )
+            ),
+            requires_grad=False,
         )
         self.backward_hadamard_matrix = nn.Parameter(
             get_hadamard_matrix(
                 self.config.hadamard_group_size,
                 self.weight.dtype,
                 self.weight.device,
-            )
+            ),
+            requires_grad=False,
         )
 
         if self.config.forward_dtype == FPQuantDtype.MXFP4:
             # MXFP4 quantization implicitly multiplies by 3.0
             self.weight_global_scale = nn.Parameter(
-                torch.tensor([3.0], dtype=torch.float32, device=self.weight.device)
+                torch.tensor([3.0], dtype=self.weight.dtype, device=self.weight.device),
+                requires_grad=False,
             )
             self.act_global_scale = nn.Parameter(
-                torch.tensor([3.0], dtype=torch.float32, device=self.weight.device)
+                torch.tensor([3.0], dtype=self.weight.dtype, device=self.weight.device),
+                requires_grad=False,
             )
         elif self.config.forward_dtype == FPQuantDtype.NVFP4:
             # MXFP4 quantization implicitly multiplies by 6.0
             self.weight_global_scale = nn.Parameter(
-                torch.tensor([10.0], dtype=torch.float32, device=self.weight.device)
+                torch.tensor(
+                    [10.0], dtype=self.weight.dtype, device=self.weight.device
+                ),
+                requires_grad=False,
             )
             self.act_global_scale = nn.Parameter(
-                torch.tensor([10.0], dtype=torch.float32, device=self.weight.device)
+                torch.tensor(
+                    [10.0], dtype=self.weight.dtype, device=self.weight.device
+                ),
+                requires_grad=False,
             )
 
         if self.config.store_master_weights:
