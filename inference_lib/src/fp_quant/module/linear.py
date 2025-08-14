@@ -4,7 +4,7 @@ from torch import nn
 
 from scipy.linalg import hadamard
 
-from ..utils import FPQuantConfig, FPQuantDtype
+from ..utils import FPQuantConfig, FPQuantDtype, validate_config
 from .linear_fns import (
     HAS_QUTLASS,
     FPQuant4x16MasterFn,
@@ -24,6 +24,10 @@ def get_hadamard_matrix(group_size: int, dtype: torch.dtype, device: torch.devic
     )
 
 
+def get_identity_matrix(group_size: int, dtype: torch.dtype, device: torch.device):
+    return torch.eye(group_size, dtype=dtype, device=device)
+
+
 class FPQuantLinear(nn.Module):
     def __init__(
         self,
@@ -35,6 +39,7 @@ class FPQuantLinear(nn.Module):
         dtype: torch.dtype = None,
     ):
         super().__init__()
+        validate_config(config)
 
         if not HAS_QUTLASS and not config.pseudoquantization:
             raise ValueError(
@@ -143,8 +148,15 @@ class FPQuantLinear(nn.Module):
             assert self.weight.data.is_cuda, (
                 f"Weight must be on CUDA, but is on {self.weight.device}"
             )
+        if self.config.transform_init == "hadamard":
+            transform_init_fn = get_hadamard_matrix
+        elif self.config.transform_init == "identity":
+            transform_init_fn = get_identity_matrix
+        else:
+            raise ValueError(f"Invalid transform init: {self.config.transform_init}")
+
         self.forward_hadamard_matrix = nn.Parameter(
-            get_hadamard_matrix(
+            transform_init_fn(
                 self.config.hadamard_group_size,
                 self.weight.dtype,
                 self.weight.device,
@@ -152,7 +164,7 @@ class FPQuantLinear(nn.Module):
             requires_grad=False,
         )
         self.backward_hadamard_matrix = nn.Parameter(
-            get_hadamard_matrix(
+            transform_init_fn(
                 self.config.hadamard_group_size,
                 self.weight.dtype,
                 self.weight.device,
@@ -274,7 +286,7 @@ class FPQuantLinear(nn.Module):
         ):
             return PseudoQuant4x16NoMasterFn.apply(
                 x,
-                self.weight,
+                self.dqweight,
                 self.weight_global_scale,
                 self.act_global_scale,
                 self.bias,

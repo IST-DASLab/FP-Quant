@@ -45,14 +45,14 @@ def mxfp4_forward_kernel(
     x_had = tl.dot(x, hadamard_matrix)
 
     # group
-    x_had_grouped = tl.reshape(x_had, (BLOCK_SIZE // group_size, group_size))
+    x_had_grouped = tl.reshape(x_had, (BLOCK_SIZE // 32, 32))
 
     # scale
     if quest:
         mean_squared = (
-            tl.sum(x_had_grouped * x_had_grouped, axis=-1, keep_dims=True) / group_size
+            tl.sum(x_had_grouped * x_had_grouped, axis=-1, keep_dims=True) / 32
         )
-        mean = tl.sum(x_had_grouped, axis=-1, keep_dims=True) / group_size
+        mean = tl.sum(x_had_grouped, axis=-1, keep_dims=True) / 32
         std = tl.sqrt(mean_squared - mean * mean)
         scales = gaussian_scale * std + 1e-8
         shared_exps = tl.exp2(tl.floor(tl.log2(scales)))

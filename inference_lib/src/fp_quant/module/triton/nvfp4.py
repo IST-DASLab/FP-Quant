@@ -23,7 +23,6 @@ def nvfp4_forward_kernel(
     output_ptr,
     n_elements: tl.constexpr,
     hadamard_dim: tl.constexpr,
-    group_size: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     offsets_hadamard = tl.arange(0, hadamard_dim * hadamard_dim)
@@ -43,7 +42,7 @@ def nvfp4_forward_kernel(
     x_had = tl.dot(x, hadamard_matrix)
 
     # group
-    x_had_grouped = tl.reshape(x_had, (BLOCK_SIZE // group_size, group_size))
+    x_had_grouped = tl.reshape(x_had, (BLOCK_SIZE // 16, 16))
 
     # scale
     if global_scale_ptr is not None:
@@ -131,7 +130,6 @@ def nvfp4_forward_kernel_wrapper(
             global_scale_ptr=global_scale,
             output_ptr=output,
             n_elements=n_elements,
-            group_size=16,
             hadamard_dim=hadamard_matrix.shape[-1],
         )
 

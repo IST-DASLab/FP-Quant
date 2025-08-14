@@ -73,7 +73,7 @@ def matmul_ada_mxf4_bf16_tn_op(
     alpha: torch.Tensor,
 ) -> torch.Tensor:
     return matmul_ada_mxf4_bf16_tn(
-        x, w, xs, ws.view(torch.float8_e8m0fnu), alpha.cpu().float()
+        x, w, xs, ws.view(torch.float8_e8m0fnu), alpha.float()
     )
 
 
@@ -153,7 +153,7 @@ def forward_quantize(
 
 def forward_gemm(x_q, w_q, x_scales, w_scales, alpha, dtype: FPQuantDtype):
     if dtype == FPQuantDtype.MXFP4:
-        if x_q.shape[0] <= 64:
+        if False and x_q.shape[0] <= 64:  # TODO: remove when ada alpha is fixed
             return matmul_ada_mxf4_bf16_tn_op(x_q, w_q, x_scales, w_scales, alpha)
         else:
             return matmul_mxf4_bf16_tn_op(x_q, w_q, x_scales, w_scales, alpha)
