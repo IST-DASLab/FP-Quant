@@ -10,7 +10,7 @@ class FPQuantDtype(Enum):
 
 
 QuantMethod = Literal["quest", "abs_max"]
-TransformInit = Literal["hadamard", "identity"]
+TransformInit = Literal["hadamard", "identity", "gsr"]
 
 
 @dataclass

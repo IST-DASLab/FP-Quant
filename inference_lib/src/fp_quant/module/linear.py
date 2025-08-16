@@ -28,6 +28,13 @@ def get_identity_matrix(group_size: int, dtype: torch.dtype, device: torch.devic
     return torch.eye(group_size, dtype=dtype, device=device)
 
 
+def get_gsr_matrix(group_size: int, dtype: torch.dtype, device: torch.device):
+    hadamard_matrix = get_hadamard_matrix(group_size, dtype, device)
+    sign_changes = torch.diff(hadamard_matrix, dim=0).ne(0).sum(dim=0) 
+    sorted_indices = torch.argsort(sign_changes)
+    return hadamard_matrix[:, sorted_indices].contiguous()
+
+
 class FPQuantLinear(nn.Module):
     def __init__(
         self,
@@ -152,6 +159,8 @@ class FPQuantLinear(nn.Module):
             transform_init_fn = get_hadamard_matrix
         elif self.config.transform_init == "identity":
             transform_init_fn = get_identity_matrix
+        elif self.config.transform_init == "gsr":
+            transform_init_fn = get_gsr_matrix
         else:
             raise ValueError(f"Invalid transform init: {self.config.transform_init}")
 
