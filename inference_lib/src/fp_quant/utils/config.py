@@ -22,6 +22,7 @@ class FPQuantConfig:
     hadamard_group_size: int = 32
     pseudoquantization: bool = False
     transform_init: TransformInit = "hadamard"
+    outliers: float = 0.0
     modules_to_not_convert: List[str] = field(default_factory=lambda: ["lm_head"])
 
 
@@ -45,3 +46,7 @@ def validate_config(config: FPQuantConfig):
         raise ValueError(
             "MXFP4 can only be used with hadamard_group_size in [32, 64, 128]"
         )
+    if (
+        config.outliers != 0 and not config.pseudoquantization
+    ):
+        raise ValueError("Outliers can only be used with pseudoquantization")

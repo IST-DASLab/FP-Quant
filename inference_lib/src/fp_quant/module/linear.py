@@ -151,10 +151,9 @@ class FPQuantLinear(nn.Module):
         assert self.weight.shape[1] % self.config.hadamard_group_size == 0, (
             f"Weight shape must be divisible by hadamard group size: {self.weight.shape[1]} % {self.config.hadamard_group_size} = {self.weight.shape[1] % self.config.hadamard_group_size}"
         )
-        if not self.config.pseudoquantization:
-            assert self.weight.data.is_cuda, (
-                f"Weight must be on CUDA, but is on {self.weight.device}"
-            )
+        assert self.weight.data.is_cuda, (
+            f"Weight must be on CUDA, but is on {self.weight.device}"
+        )
         if self.config.transform_init == "hadamard":
             transform_init_fn = get_hadamard_matrix
         elif self.config.transform_init == "identity":
@@ -217,6 +216,7 @@ class FPQuantLinear(nn.Module):
                 self.weight_global_scale,
                 self.config.forward_dtype,
                 self.config.forward_method,
+                self.config.outliers,
             )
             self.dqweight = nn.Parameter(weight_dq, requires_grad=False)
             self.weight = None
@@ -286,6 +286,7 @@ class FPQuantLinear(nn.Module):
                 self.forward_hadamard_matrix,
                 self.config.forward_dtype,
                 self.config.forward_method,
+                self.config.outliers,
             )
         elif (
             self.config.forward_dtype in (FPQuantDtype.MXFP4, FPQuantDtype.NVFP4)
@@ -302,6 +303,7 @@ class FPQuantLinear(nn.Module):
                 self.forward_hadamard_matrix,
                 self.config.forward_dtype,
                 self.config.forward_method,
+                self.config.outliers,
             )
         else:
             raise ValueError(

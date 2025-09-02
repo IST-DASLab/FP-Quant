@@ -111,6 +111,7 @@ def nvfp4_forward_kernel_wrapper(
     x,
     hadamard_matrix,
     global_scale,
+    outliers:float=0.0,
 ):
     # Make sure inputs are contiguous
     x = x.contiguous()
@@ -132,5 +133,20 @@ def nvfp4_forward_kernel_wrapper(
             n_elements=n_elements,
             hadamard_dim=hadamard_matrix.shape[-1],
         )
+        
+    if isinstance(outliers, float) and outliers > 0.0:
+        x_rotated = (x.view(-1, hadamard_matrix.shape[0]) @ hadamard_matrix).view_as(x)
+        k = int(outliers * x.numel())
+        if k == 0:
+            return output
+
+        outlier_indices = torch.topk(x_rotated.abs().view(-1), k=k).indices
+        output.view(-1)[outlier_indices] = x_rotated.view(-1)[outlier_indices]
+    elif isinstance(outliers, str) and outliers == "one_per_group":
+        x_rotated = (x.view(-1, hadamard_matrix.shape[0]) @ hadamard_matrix)
+        output = output.view_as(x_rotated)
+        outlier_indices = torch.argmax(x_rotated.abs(), dim=-1, keepdim=True)
+        output.scatter_(-1, outlier_indices, x_rotated.gather(-1, outlier_indices))
+        output = output.view_as(x)
 
     return output
