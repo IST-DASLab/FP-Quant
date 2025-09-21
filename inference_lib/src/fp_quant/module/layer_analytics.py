@@ -9,9 +9,6 @@ all_added_layer_names = []
 layer_list = {
     
 }
-config = FPQuantConfig(forward_dtype=FPQuantDtype.MXFP4, forward_method="abs_max", 
-                                backward_dtype=FPQuantDtype.BF16, hadamard_group_size=32)
-
 
 def bench_ms(fn, warmup=10, iters=100):
     start_evt = torch.cuda.Event(enable_timing=True)
@@ -37,6 +34,7 @@ def add_layer(layer: torch.nn.Module, layer_name: str, input_shape: torch.Size, 
         return
     
     layer_info = {
+        "config": layer.config,
         "bias": layer.bias is not None,
         "layer_name": layer_name,
         "input_shape": list(input_shape),
@@ -69,23 +67,26 @@ def analyze_layers():
         out_features = layer_list[name]["out_features"]
         device = layer_list[name]["device"]
         dtype = layer_list[name]["dtype"]
+        config = layer_list[name]["config"]
 
         key = (input_shape, in_features, out_features, device, dtype, bias)
 
         # Only keep the first layer encountered for each unique key
         if key not in unique_layers:
             unique_layers[key] = {
+                "config": config
             }
 
     # Now for each unique layer
     for key in unique_layers:
         input_shape, in_features, out_features, device, dtype, bias = key
+        config = unique_layers[key]["config"]
 
         device = torch.device(device)
         dtype = torch.__dict__[dtype.split('.')[-1]]
         nn_layer = torch.nn.Linear(in_features, out_features, bias=bias, device=device, dtype=dtype)
         from .linear import FPQuantLinear
-        quantized_layer = FPQuantLinear(in_features, out_features, bias=bias, config=config, device='cuda', dtype=torch.bfloat16)
+        quantized_layer = FPQuantLinear(in_features, out_features, bias=bias, config=config, device=device, dtype=dtype)
         quantized_layer.pre_forward()
 
         with torch.no_grad():
@@ -124,6 +125,7 @@ def analyze_layers():
         key = (input_shape, in_features, out_features, device, dtype, bias)
         layer_list[name]["quantized_layer_time"] = unique_layers[key]["quantized_layer_time"]
         layer_list[name]["nn_layer_time"] = unique_layers[key]["nn_layer_time"]
+        del layer_list[name]["config"]
 
     # Save to file
     with open("layer_analytics.json", "w") as f:

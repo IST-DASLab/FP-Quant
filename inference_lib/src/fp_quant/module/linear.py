@@ -58,6 +58,9 @@ class FPQuantLinear(nn.Module):
             )
 
         factory_kwargs = {"device": device, "dtype": dtype}
+        self.device = device
+        self.dtype = dtype
+        
         self.in_features = in_features
         self.out_features = out_features
         self.name = name
