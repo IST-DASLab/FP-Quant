@@ -40,7 +40,7 @@ def _(x_flat, hadamard_matrix, forward_method):
 
 @torch.library.custom_op("fp_quant::matmul_mxf4_bf16_tn_op", mutates_args=())
 def matmul_mxf4_bf16_tn_op(
-    x: torch.Tensor, w: torch.Tensor, xs: torch.Tensor, ws: torch.Tensor, alpha: float
+    x: torch.Tensor, w: torch.Tensor, xs: torch.Tensor, ws: torch.Tensor, alpha: torch.Tensor
 ) -> torch.Tensor:
     return matmul_mxf4_bf16_tn(
         x, w, to_blocked(xs), to_blocked(ws).view(torch.float8_e8m0fnu), alpha
@@ -54,7 +54,7 @@ def _(x, w, xs, ws, alpha):
 
 @torch.library.custom_op("fp_quant::matmul_ada_mxf4_bf16_tn_op", mutates_args=())
 def matmul_ada_mxf4_bf16_tn_op(
-    x: torch.Tensor, w: torch.Tensor, xs: torch.Tensor, ws: torch.Tensor, alpha: float
+    x: torch.Tensor, w: torch.Tensor, xs: torch.Tensor, ws: torch.Tensor, alpha: torch.Tensor
 ) -> torch.Tensor:
     return matmul_ada_mxf4_bf16_tn(x, w, xs, ws.view(torch.float8_e8m0fnu), alpha)
 
@@ -248,7 +248,7 @@ class FPQuant4x16NoMasterFn(Function):
             x_flat, forward_hadamard_matrix, dtype, forward_method
         )
 
-        y = forward_gemm(x_flat_q, weight_q, x_flat_scales, weight_scales, 1.0 / 9.0)
+        y = forward_gemm(x_flat_q, weight_q, x_flat_scales, weight_scales, torch.tensor([1.0 / 9.0], device=x.device))
 
         y = y.unflatten(dim=0, sizes=x.shape[:-1])
         if bias is not None:
