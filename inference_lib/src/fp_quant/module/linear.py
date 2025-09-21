@@ -5,6 +5,9 @@ from torch import nn
 from scipy.linalg import hadamard
 
 from ..utils import FPQuantConfig, FPQuantDtype
+
+from . import layer_analytics
+
 from .linear_fns import (
     HAS_QUTLASS,
     FPQuant4x16MasterFn,
@@ -23,6 +26,17 @@ def get_hadamard_matrix(group_size: int, dtype: torch.dtype, device: torch.devic
         hadamard(group_size) * group_size**-0.5, dtype=dtype, device=device
     )
 
+def free_param(param: torch.nn.Parameter):
+    if param is not None:
+        # Move off GPU to free CUDA memory
+        if param.device.type == "cuda":
+            param.data = param.data.cpu()
+
+        # Break the computational graph and drop storage reference
+        param.detach_()
+
+        # Remove the parameter reference
+        del param
 
 class FPQuantLinear(nn.Module):
     def __init__(
@@ -33,6 +47,8 @@ class FPQuantLinear(nn.Module):
         bias: bool = True,
         device: torch.device = None,
         dtype: torch.dtype = None,
+        name: str = None,
+        enable_analytics: bool = False,
     ):
         super().__init__()
 
@@ -44,12 +60,14 @@ class FPQuantLinear(nn.Module):
         factory_kwargs = {"device": device, "dtype": dtype}
         self.in_features = in_features
         self.out_features = out_features
+        self.name = name
+        self.name_analyzed = not enable_analytics
+
         self.weight = nn.Parameter(
             torch.empty((out_features, in_features), **factory_kwargs)
         )
-        self.dqweight = nn.Parameter(
-            torch.empty((out_features, in_features), **factory_kwargs)
-        )
+        self.dqweight = None
+
         if bias:
             self.bias = nn.Parameter(torch.empty(out_features, **factory_kwargs))
         else:
@@ -159,10 +177,25 @@ class FPQuantLinear(nn.Module):
             self.scales = nn.Parameter(
                 scales.view(dtype=torch.uint8), requires_grad=False
             )
+
+            if self.weight is not None:
+                free_param(self.weight)
+                self.register_parameter("weight", None)
+                torch.cuda.empty_cache()
+                del self.weight
+
             self.weight = None
             self.dqweight = None
 
     def forward(self, x) -> torch.Tensor:
+        
+        if self.name is not None and not self.name_analyzed:
+            self.name_analyzed = True
+            layer_analytics.add_layer(self, self.name, x.shape, self.in_features, self.out_features, x.device, x.dtype)
+
+
+        result = None
+
         match (
             self.config.forward_dtype,
             self.config.backward_dtype,
@@ -170,7 +203,7 @@ class FPQuantLinear(nn.Module):
             self.config.pseudoquantization,
         ):
             case (FPQuantDtype.MXFP4, FPQuantDtype.BF16, True, False):
-                return FPQuant4x16MasterFn.apply(
+                result = FPQuant4x16MasterFn.apply(
                     x,
                     self.weight,
                     self.bias,
@@ -179,7 +212,7 @@ class FPQuantLinear(nn.Module):
                     self.config.forward_method,
                 )
             case (FPQuantDtype.MXFP4, FPQuantDtype.BF16, False, False):
-                return FPQuant4x16NoMasterFn.apply(
+                result = FPQuant4x16NoMasterFn.apply(
                     x,
                     self.qweight,
                     self.scales,
@@ -189,7 +222,7 @@ class FPQuantLinear(nn.Module):
                     self.config.forward_method,
                 )
             case (FPQuantDtype.MXFP4, FPQuantDtype.BF16, True, True):
-                return PseudoQuant4x16MasterFn.apply(
+                result = PseudoQuant4x16MasterFn.apply(
                     x,
                     self.dqweight,
                     self.bias,
@@ -198,7 +231,7 @@ class FPQuantLinear(nn.Module):
                     self.config.forward_method,
                 )
             case (FPQuantDtype.MXFP4, FPQuantDtype.BF16, False, True):
-                return PseudoQuant4x16NoMasterFn.apply(
+                result = PseudoQuant4x16NoMasterFn.apply(
                     x,
                     self.dqweight,
                     self.bias,
@@ -210,3 +243,6 @@ class FPQuantLinear(nn.Module):
                 raise ValueError(
                     f"Forward dtype: {self.config.forward_dtype}, backward dtype: {self.config.backward_dtype}, store_master_weights: {self.config.store_master_weights}, pseudoquantization: {self.config.pseudoquantization} isn't supported yet."
                 )
+            
+        return result
+    
