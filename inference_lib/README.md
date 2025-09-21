@@ -8,12 +8,13 @@ pipe = FluxKontextPipeline.from_pretrained("/home/cropy/flux_kontext",
                                         local_files_only=True,
                                         quantization_config=pipeline_quant_config,
                                         torch_dtype=torch.bfloat16)
+
 pipe.to("cuda")
 
 # Apply Qutlass quantization to the transformer
-# Read the layer analytics (if present) to compare each layer’s quantized runtime with the normal runtime.
-
 try:
+
+    # read layer_analytics.json
     with open("layer_analytics.json", "r") as f:
         layer_analytics_list = json.load(f)
         layer_analytics_list = [key for key in layer_analytics_list if layer_analytics_list[key]["quantized_layer_time"]/layer_analytics_list[key]["nn_layer_time"] > 0.95]
@@ -27,7 +28,15 @@ from fp_quant.inference_lib.src.fp_quant import FPQuantLinear, FPQuantConfig, FP
 fp_quant_config = FPQuantConfig(forward_dtype=FPQuantDtype.MXFP4, forward_method="abs_max", 
                                 backward_dtype=FPQuantDtype.BF16, hadamard_group_size=32,
                                 modules_to_not_convert=[
-                                    "x_embedder", # we should not quantize x_embedder. Otherwise the resulting image looks like noise.
+                                    # "pos_embed",
+                                    # "text_time_guidance_cls",
+                                    # "time_text_embed",
+                                    # "transformer_blocks",
+                                    # "single_transformer_blocks",
+                                    # "proj_out",
+                                    # "norm_out",
+                                    "x_embedder",
+                                    # "context_embedder",
                                     *layer_analytics_list
                                 ],
 )
@@ -55,11 +64,7 @@ num_images_per_prompt = 1
 for _ in range(5):
     images = pipe(
     image=input_image,
-    prompt="Your prompt",
-
-
-    negative_prompt="blurry, low quality, bad quality, worst quality, deformed, distorted, worst quality",
-    guidance_scale=2.5,
+    prompt="Your prompt!",
     height=height, 
     width=width,
     max_area=height*width,
@@ -72,5 +77,6 @@ for _ in range(5):
     for i in range(num_images_per_prompt):
         file_name_i = file_name.replace(".jpg", f"_{i}.jpg").replace(".png", f"_{i}.png")
         images[i].save(file_name_i)
+
 
 ~~~
