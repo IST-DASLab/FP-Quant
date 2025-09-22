@@ -1,3 +1,5 @@
+See: [https://github.com/IST-DASLab/FP-Quant/pull/6](https://github.com/IST-DASLab/FP-Quant/pull/6)
+
 # FP Format Quantization Harness
 
 This is a harness for efficient and accurate weight-and-activation quantization for low-bit FP/INT formats, with and without microscaling, including FP4, NVFP4, and MXFP. These formats are compatible with the NVIDIA Blackwell GPU architecture. 
