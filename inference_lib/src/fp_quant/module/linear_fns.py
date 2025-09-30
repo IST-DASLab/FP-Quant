@@ -1,11 +1,17 @@
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 from torch import nn
 from torch.autograd import Function
 
 try:
-    from qutlass import fusedQuantizeMx, matmul_ada_mxf4_bf16_tn, matmul_mxf4_bf16_tn
+    from qutlass import (
+        fusedQuantizeMx,
+        fusedQuantizeNv,
+        matmul_ada_mxf4_bf16_tn,
+        matmul_mxf4_bf16_tn,
+        matmul_nvf4_bf16_tn,
+    )
     from qutlass.utils import to_blocked
 
     HAS_QUTLASS = True
@@ -15,10 +21,12 @@ except ImportError:
 from ..utils import FPQuantDtype
 
 
-@torch.library.custom_op("fp_quant::fused_quantize_op", mutates_args=())
+@torch.library.custom_op("fp_quant::fused_quantize_mx_op", mutates_args=())
 def fused_quantize_mx_op(
-    x_flat: torch.Tensor, hadamard_matrix: torch.Tensor, forward_method: str
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    x_flat: torch.Tensor,
+    hadamard_matrix: torch.Tensor,
+    forward_method: str,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     return fusedQuantizeMx(x_flat, hadamard_matrix, method=forward_method)
 
 
@@ -40,10 +48,14 @@ def _(x_flat, hadamard_matrix, forward_method):
 
 @torch.library.custom_op("fp_quant::matmul_mxf4_bf16_tn_op", mutates_args=())
 def matmul_mxf4_bf16_tn_op(
-    x: torch.Tensor, w: torch.Tensor, xs: torch.Tensor, ws: torch.Tensor, alpha: float
+    x: torch.Tensor,
+    w: torch.Tensor,
+    xs: torch.Tensor,
+    ws: torch.Tensor,
+    alpha: torch.Tensor,
 ) -> torch.Tensor:
     return matmul_mxf4_bf16_tn(
-        x, w, to_blocked(xs), to_blocked(ws).view(torch.float8_e8m0fnu), alpha
+        x, w, to_blocked(xs), to_blocked(ws).view(torch.float8_e8m0fnu), alpha.float()
     )
 
 
@@ -54,9 +66,15 @@ def _(x, w, xs, ws, alpha):
 
 @torch.library.custom_op("fp_quant::matmul_ada_mxf4_bf16_tn_op", mutates_args=())
 def matmul_ada_mxf4_bf16_tn_op(
-    x: torch.Tensor, w: torch.Tensor, xs: torch.Tensor, ws: torch.Tensor, alpha: float
+    x: torch.Tensor,
+    w: torch.Tensor,
+    xs: torch.Tensor,
+    ws: torch.Tensor,
+    alpha: torch.Tensor,
 ) -> torch.Tensor:
-    return matmul_ada_mxf4_bf16_tn(x, w, xs, ws.view(torch.float8_e8m0fnu), alpha)
+    return matmul_ada_mxf4_bf16_tn(
+        x, w, xs, ws.view(torch.float8_e8m0fnu), alpha.float()
+    )
 
 
 @matmul_ada_mxf4_bf16_tn_op.register_fake
@@ -64,89 +82,95 @@ def _(x, w, xs, ws, alpha):
     return x.new_empty(*x.shape[:-1], w.shape[0], dtype=torch.bfloat16)
 
 
-FP4_GRID = torch.tensor(
-    [
-        0.0,
-        0.5,
-        1.0,
-        1.5,
-        2.0,
-        3.0,
-        4.0,
-        6.0,
-        -0.0,
-        -0.5,
-        -1.0,
-        -1.5,
-        -2.0,
-        -3.0,
-        -4.0,
-        -6.0,
-    ],
-    dtype=torch.bfloat16,
-)
+@torch.library.custom_op("fp_quant::fused_quantize_nv_op", mutates_args=())
+def fused_quantize_nv_op(
+    x_flat: torch.Tensor,
+    hadamard_matrix: torch.Tensor,
+    global_scale: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return fusedQuantizeNv(x_flat, hadamard_matrix, global_scale.float())
 
 
-def dequantize_mxf4_bf16(xq: torch.Tensor, exps: torch.Tensor) -> torch.Tensor:
-    xq_unpacked = torch.stack([xq & 0xF, xq >> 4], dim=-1).to(torch.int32)
-    x_dequantized = FP4_GRID.to(xq.device)[xq_unpacked]
-
-    float_exps = 2 ** (exps.view(dtype=torch.uint8).to(torch.int32) - 127).to(
-        torch.bfloat16
-    )
-    return (x_dequantized.view(-1, 32) * float_exps.view(-1, 1)).view(
-        *xq.shape[:-1], -1
+@fused_quantize_nv_op.register_fake
+def _(x_flat, hadamard_matrix, global_scale):
+    xh_e2m1 = torch.empty(
+        *x_flat.shape[:-1],
+        x_flat.size(-1) // 2,
+        dtype=torch.uint8,
+        device=x_flat.device,
     )
 
-
-# @torch.compile()
-@torch.inference_mode()
-def _unpack_mask(clip_mask: torch.Tensor) -> torch.Tensor:
-    clip_mask_unpacked_dq = torch.zeros(
-        *clip_mask.shape[:-1],
-        clip_mask.size(-1) * 8,
-        dtype=torch.bool,
-        device=clip_mask.device,
+    rows, cols = x_flat.numel() // x_flat.size(-1), x_flat.size(-1) // 16
+    n_row_blocks = (rows + 128 - 1) // 128
+    n_col_blocks = (cols + 4 - 1) // 4
+    padded_rows = n_row_blocks * 128
+    padded_cols = n_col_blocks * 4
+    xh_e4m3 = torch.empty(
+        padded_rows, padded_cols, dtype=torch.float8_e4m3fn, device=x_flat.device
     )
-    for i in range(8):
-        clip_mask_unpacked_dq[..., i::8] = (clip_mask >> i) & 1
-    return clip_mask_unpacked_dq
+
+    return xh_e2m1, xh_e4m3
+
+
+@torch.library.custom_op("fp_quant::matmul_nvf4_bf16_tn_op", mutates_args=())
+def matmul_nvf4_bf16_tn_op(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    xs: torch.Tensor,
+    ws: torch.Tensor,
+    alpha: torch.Tensor,
+) -> torch.Tensor:
+    return matmul_nvf4_bf16_tn(
+        x, w, to_blocked(xs), to_blocked(ws.view(torch.float8_e4m3fn)), alpha.float()
+    )
+
+
+@matmul_nvf4_bf16_tn_op.register_fake
+def _(x, w, xs, ws, alpha):
+    return x.new_empty(*x.shape[:-1], w.shape[0], dtype=torch.bfloat16)
 
 
 def forward_quantize(
     x: torch.Tensor,
     hadamard_matrix: torch.Tensor,
+    global_scale: torch.Tensor,
     dtype: FPQuantDtype,
     forward_method: str,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    match dtype:
-        case FPQuantDtype.MXFP4:
-            qweight_scales, scales = fused_quantize_mx_op(
-                x, hadamard_matrix, forward_method
-            )
-            return qweight_scales, scales, None  # TODO: add mask
-        case FPQuantDtype.MXFP8:
-            raise NotImplementedError(
-                "MXFP8 is not supported for forward quantization yet"
-            )
-        case _:
-            raise ValueError(f"Unsupported forward dtype: {dtype}")
-
-
-def forward_gemm(x_q, w_q, x_scales, w_scales, alpha):
-    if x_q.shape[0] <= 64:
-        return matmul_ada_mxf4_bf16_tn_op(x_q, w_q, x_scales, w_scales, alpha)
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if dtype == FPQuantDtype.MXFP4:
+        qweight, scales = fused_quantize_mx_op(
+            x,
+            hadamard_matrix,
+            forward_method,
+        )
+        return qweight, scales, None  # TODO: add mask
+    elif dtype == FPQuantDtype.NVFP4:
+        qweight, scales = fused_quantize_nv_op(x, hadamard_matrix, global_scale)
+        return qweight, scales, None  # TODO: add mask
     else:
-        return matmul_mxf4_bf16_tn_op(x_q, w_q, x_scales, w_scales, alpha)
+        raise ValueError(f"Unsupported forward dtype: {dtype}")
+
+
+def forward_gemm(x_q, w_q, x_scales, w_scales, alpha, dtype: FPQuantDtype):
+    if dtype == FPQuantDtype.MXFP4:
+        if False and x_q.shape[0] <= 64:  # TODO: remove when ada alpha is fixed
+            return matmul_ada_mxf4_bf16_tn_op(x_q, w_q, x_scales, w_scales, alpha)
+        else:
+            return matmul_mxf4_bf16_tn_op(x_q, w_q, x_scales, w_scales, alpha)
+    elif dtype == FPQuantDtype.NVFP4:
+        return matmul_nvf4_bf16_tn_op(x_q, w_q, x_scales, w_scales, alpha)
+    else:
+        raise ValueError(f"Unsupported dtype: {dtype}")
 
 
 class FPQuant4x16MasterFn(Function):
     @staticmethod
-    # @torch.compile()
     def forward(
         ctx,
         x: torch.Tensor,
         weight: torch.Tensor,
+        weight_global_scale: torch.Tensor,
+        act_global_scale: torch.Tensor,
         bias: Optional[torch.Tensor],
         forward_hadamard_matrix: torch.Tensor,
         dtype: FPQuantDtype,
@@ -156,15 +180,22 @@ class FPQuant4x16MasterFn(Function):
 
         # Quantize input
         x_flat_q, x_flat_scales, x_flat_mask = forward_quantize(
-            x_flat, forward_hadamard_matrix, dtype, forward_method
+            x_flat, forward_hadamard_matrix, act_global_scale, dtype, forward_method
         )
 
         # Quantize weights
         weight_q, weight_scales, weight_mask = forward_quantize(
-            weight, forward_hadamard_matrix, dtype, forward_method
+            weight, forward_hadamard_matrix, weight_global_scale, dtype, forward_method
         )
 
-        y = forward_gemm(x_flat_q, weight_q, x_flat_scales, weight_scales, 1.0 / 9.0)
+        y = forward_gemm(
+            x_flat_q,
+            weight_q,
+            x_flat_scales,
+            weight_scales,
+            1.0 / (weight_global_scale * act_global_scale),
+            dtype,
+        )
 
         y = y.unflatten(dim=0, sizes=x.shape[:-1])
         if bias is not None:
@@ -191,51 +222,17 @@ class FPQuant4x16MasterFn(Function):
         raise NotImplementedError(
             "Backward pass is not implemented for FPQuant4x16MasterFn yet"
         )
-        (
-            x_flat_q,
-            weight_q,
-            x_flat_scales,
-            weight_scales,
-            x_flat_mask,
-            weight_mask,
-            forward_hadamard_matrix,
-        ) = ctx.saved_tensors
-
-        x_flat_dequantized = dequantize_mxf4_bf16(x_flat_q, x_flat_scales) / 3.0
-        weight_dequantized = dequantize_mxf4_bf16(weight_q, weight_scales) / 3.0
-        grad_output_flat = grad_output.flatten(end_dim=-2)
-
-        grad_input = torch.einsum("...j,ji->...i", grad_output_flat, weight_dequantized)
-        x_flat_mask = _unpack_mask(x_flat_mask)
-        grad_input = (
-            (grad_input.view(-1, 32) * x_flat_mask.view(-1, 32).to(grad_input.dtype))
-            @ forward_hadamard_matrix.T
-        ).view(ctx.x_shape)
-
-        grad_weight = torch.einsum(
-            "...j,...i->ji", grad_output_flat, x_flat_dequantized
-        )
-        weight_mask = _unpack_mask(weight_mask)
-        grad_weight = (
-            (grad_weight.view(-1, 32) * weight_mask.view(-1, 32).to(grad_weight.dtype))
-            @ forward_hadamard_matrix.T
-        ).view(grad_output.size(-1), weight_q.size(-1) * 2)
-
-        grad_bias = (
-            grad_output.flatten(end_dim=-2).sum(dim=0) if ctx.bias_present else None
-        )
-
-        return grad_input, grad_weight, grad_bias, None, None, None
 
 
 class FPQuant4x16NoMasterFn(Function):
     @staticmethod
-    # @torch.compile()
     def forward(
         ctx,
         x: torch.Tensor,
         weight_q: torch.Tensor,
         weight_scales: torch.Tensor,
+        weight_global_scale: torch.Tensor,
+        act_global_scale: torch.Tensor,
         bias: Optional[torch.Tensor],
         forward_hadamard_matrix: torch.Tensor,
         dtype: FPQuantDtype,
@@ -245,10 +242,17 @@ class FPQuant4x16NoMasterFn(Function):
 
         # Quantize input
         x_flat_q, x_flat_scales, x_flat_mask = forward_quantize(
-            x_flat, forward_hadamard_matrix, dtype, forward_method
+            x_flat, forward_hadamard_matrix, act_global_scale, dtype, forward_method
         )
 
-        y = forward_gemm(x_flat_q, weight_q, x_flat_scales, weight_scales, 1.0 / 9.0)
+        y = forward_gemm(
+            x_flat_q,
+            weight_q,
+            x_flat_scales,
+            weight_scales,
+            1.0 / (weight_global_scale * act_global_scale),
+            dtype,
+        )
 
         y = y.unflatten(dim=0, sizes=x.shape[:-1])
         if bias is not None:
@@ -269,27 +273,7 @@ class FPQuant4x16NoMasterFn(Function):
         return y
 
     @staticmethod
-    # @torch.compile()
     def backward(ctx, grad_output: torch.Tensor):
         raise NotImplementedError(
             "Backward pass is not implemented for FPQuant4x16NoMasterFn yet"
         )
-        _, weight_q, _, weight_scales, x_flat_mask, forward_hadamard_matrix = (
-            ctx.saved_tensors
-        )
-
-        weight_dequantized = dequantize_mxf4_bf16(weight_q, weight_scales) / 3.0
-        grad_output_flat = grad_output.flatten(end_dim=-2)
-
-        grad_input = torch.einsum("...j,ji->...i", grad_output_flat, weight_dequantized)
-        x_flat_mask = _unpack_mask(x_flat_mask)
-        grad_input = (
-            (grad_input.view(-1, 32) * x_flat_mask.view(-1, 32).to(grad_input.dtype))
-            @ forward_hadamard_matrix.T
-        ).view(ctx.x_shape)
-
-        grad_bias = (
-            grad_output.flatten(end_dim=-2).sum(dim=0) if ctx.bias_present else None
-        )
-
-        return grad_input, None, None, grad_bias, None, None, None

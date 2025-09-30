@@ -2,7 +2,7 @@ from setuptools import find_packages, setup
 
 setup(
     name="fp_quant",
-    version="0.1.6",
+    version="0.2.0",
     packages=find_packages(where="src"),
     package_dir={"": "src"},
     author="Andrei Panferov",
@@ -16,7 +16,7 @@ setup(
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
     ],
-    python_requires=">=3.11",
+    python_requires=">=3.9",
     install_requires=[
         "torch>=2.7.0",
         "scipy>=1.13.0",
