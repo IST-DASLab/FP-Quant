@@ -4,8 +4,16 @@ import torch
 
 from .quant_args import QuantizationFormat, QuantizationGranularity, QuantizationObserver, ScalePrecision
 from .quant_ops import FP8_E4M3_MAX, FP4_E2M1_MAX, FP4_SCALE, get_quantization_fns, get_quantization_range, cast_to_eBm0
-
 from ..helpers import split_dim
+
+# Utility function for inversion.
+def get_reciprocal(x):
+    if isinstance(x, torch.Tensor):
+        return torch.where(x == 0, torch.tensor(0.0, dtype=x.dtype), 1.0 / x)
+    elif isinstance(x, (float, int)):
+        return 0.0 if x == 0 else 1.0 / x
+    else:
+        raise TypeError("Input must be a float, int, or a torch.Tensor.")
 
 
 class Quantizer:
@@ -20,7 +28,7 @@ class Quantizer:
         dim: int = -1,
         group_size: Optional[int] = None,
         scale_precision: str = "fp16",
-        scale_factor: float = 1.0, # Used only for MXFP
+        scale_min_clip: Optional[float] = None
     ):
         # Sanity checks
         if format in ["fp", "nvfp", "mxfp"]:
@@ -39,7 +47,7 @@ class Quantizer:
         self.scale_precision = ScalePrecision(scale_precision)
         self.dim = dim
         self.group_size = group_size
-        self.scale_factor = scale_factor
+        self.scale_min_clip = scale_min_clip
 
         self.quant_fn, self.dequant_fn, self.quant_dequant_fn = get_quantization_fns(
             format=self.format,
@@ -51,6 +59,14 @@ class Quantizer:
             bits=self.bits,
             symmetric=self.symmetric,
         )
+        
+        # Global scale is 3 for MXFP quantization
+        if self.format == QuantizationFormat.MXFP:
+            self.global_scale = torch.tensor([3.0], dtype=torch.float32)
+        else:
+            self.global_scale = torch.tensor([float("inf")], dtype=torch.float32)
+        # Scale tracking is needed only for E4M3 scale quantization
+        self._track_global_scale = (self.scale_precision == ScalePrecision.E4M3)
 
     def _reshape_before_quantization(
         self, 
@@ -125,10 +141,34 @@ class Quantizer:
                 zeros = zeros.squeeze(dim + 1)
 
         if self.scale_precision == ScalePrecision.E4M3:
-            global_scale = scales.max() / FP8_E4M3_MAX
-            scales = scales.div(global_scale).to(torch.float8_e4m3fn).to(x.dtype).mul(global_scale)
+            with torch.no_grad():
+                if self._track_global_scale:
+                    current_global_scale = FP8_E4M3_MAX * FP4_E2M1_MAX * get_reciprocal(x.abs().max().to(torch.float32).view(1))
+                    if not current_global_scale:
+                        raise ValueError(f"Current global scale is not finite: {current_global_scale}\n")
+                    # Update global scale using min of current and computed scale
+                    self.global_scale = torch.minimum(self.global_scale.to(x.device), current_global_scale)
+                    
+                    if not self.global_scale.isfinite():
+                        raise ValueError(f"Global scale is not finite: {self.global_scale}\n")
+                    
+                # Clamp, convert to fp8, convert back, and rescale in one chain
+                scales = (scales * self.global_scale).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX) \
+                    .to(torch.float8_e4m3fn) \
+                    .to(torch.float32) \
+                    .mul(get_reciprocal(self.global_scale)) \
+                    .to(x.dtype)
+        
         elif self.scale_precision == ScalePrecision.E8M0:
-            scales = cast_to_eBm0(FP4_E2M1_MAX * scales, ebits=8, emax=2) / self.scale_factor
+            # Inspired by quantize_tseng (see https://github.com/IST-DASLab/Quartet/blob/main/notebooks/benchmark_mxfp4.ipynb)
+            # NOTE (in quartet x.abs().max() is defined as a scale insteaf of x.abs().max() / q_max )
+            scales = cast_to_eBm0(FP4_E2M1_MAX * scales, ebits=8, emax=2) / FP4_SCALE
+
+        # Set scales to 1 if zero
+        scales[scales == 0] = 1
+
+        if scales.isnan().any():
+            raise ValueError(f"Scales are not finite.")
       
         return scales, zeros
         

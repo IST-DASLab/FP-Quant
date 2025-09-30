@@ -35,7 +35,7 @@ def pack_fp4_to_uint8(x: torch.Tensor) -> torch.Tensor:
     grid_ids = torch.bucketize(x, grid)
     lo, hi = (grid_ids - 1).clamp(min=0, max=2 ** 4 - 1), grid_ids.clamp(min=0, max=2 ** 4 - 1)
     g_lo, g_hi = grid[lo], grid[hi]
-    pick_hi = (g_hi - x) <= (x - g_lo)
+    pick_hi = (g_hi - x < x - g_lo) | (g_hi - x == x - g_lo) & (perm[hi] % 2 == 0)
     q = torch.where(pick_hi, perm[hi], perm[lo])
     return (q[:, 1::2] << 4 | q[:, ::2]).to(torch.uint8)
 ### Integer Quantization ###
@@ -68,7 +68,7 @@ def cast_to_fp4(x):
     return x * sign
 
 def quantize_fp4(x: torch.Tensor, scales: torch.Tensor, zeros: torch.Tensor, q_min: int, q_max: int):
-    return torch.clamp(cast_to_fp4(x / scales), q_min, q_max)
+    return cast_to_fp4(x / scales)
 
 def dequantize_fp4(q: torch.Tensor, scales: torch.Tensor, zeros: torch.Tensor):
     return q.mul(scales)
@@ -107,15 +107,12 @@ def get_quantization_fns(format: QuantizationFormat, bits: int) -> Tuple[Callabl
         f"bits: {bits}\n"
     )
 
-def prepare_scales_for_saving(
-    scales: torch.Tensor, 
-    scale_precision: str,
-    scale_factor: float = 1.0
-) -> torch.Tensor:
+### Saving utilities ###
+def cast_scales_to_eXmY(scales: torch.Tensor, scale_precision: str) -> torch.Tensor:
     scale_precision = ScalePrecision(scale_precision)
     if scale_precision == ScalePrecision.E4M3:
-        return scales.to(torch.float8_e4m3fn)
+        return scales.to(torch.float8_e4m3fn).view(torch.uint8)
     elif scale_precision == ScalePrecision.E8M0:
-        # 2 is EMAX (4 = 2 ^ EMAX)
-        scales = (scales * scale_factor * 4).to(torch.float8_e8m0fnu).view(torch.uint8)
+        # 2 is EMAX
+        scales = scales.to(torch.float8_e8m0fnu).view(torch.uint8)
     return scales

@@ -1,32 +1,41 @@
-# FP Format Quantization Harness
+# Bridging the Gap Between Promise and Performance for Microscaling FP4 Quantization 
 
-This is a harness for efficient and accurate weight-and-activation quantization for low-bit FP/INT formats, with and without microscaling, including FP4, NVFP4, and MXFP. These formats are compatible with the NVIDIA Blackwell GPU architecture. 
+<a href='https://arxiv.org/pdf/2509.23202'><img src='https://img.shields.io/badge/ArXiv-PDF-red' height="25"></a> &nbsp; 
 
-The goal of the repository is to allow you to produce quantized models in these formats. 
-Currently, the repository supports the standard microscaled MXFP4 format, together with standard methods such as RTN and GPTQ quantization for the weights. The main new approach supported--which we found to be particularly effective--is a variant of GPTQ (called GPTQ+Had) where a block-wise Hadamard transform is applied onto the weights and activations before quantization. Key to efficiency is that the Hadamard block size matches the microscaling format group size (16 or 32); in turn, this small Hadamard transform is automatically "fused" into our MatMul kernels. 
-
-The inference code to run models in the `MXFP` format (with speedups) can be found in the [QuTLASS](https://github.com/IST-DASLab/qutlass) repository. 
+The official implementation for the paper [Bridging the Gap Between Promise and Performance for Microscaling FP4 Quantization](https://arxiv.org/abs/2509.23202).
 
 ### Repository structure
 ---
 
 The repository is structured as follows:
 
-* `model_quant.py` - the main script for quantization of Llama/Qwen models
+* `model_quant.py` - the main quantization script
 * `src/` - source code with implementation of all necessary functionality \
     ```├── quantization``` - quantization functionality \
     ```├── transforms``` - transform functionality \
     ```├── utils``` - utility functions
 
 
-
 ### Usage
 ---
 
-Below is an example of the model quantization script usage:
+*Quantization*
+
+**NOTE** - The quantization script is designed to be run on a single GPU.
+
+**NOTE** - Only Llama and Qwen3 models are supported.
+
+Below is an example of the quantization script usage:
 
 ```shell
-MODEL=${MODEL:-"meta-llama/Llama-3.1-8B-Instruct"}
+#!/bin/bash
+export OMP_NUM_THREADS=8
+export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:128"
+
+MODEL=${MODEL:-"meta-llama/Llama-3.2-1B-Instruct"}
+MODEL_ID=$( echo $MODEL | awk -F/ '{print $NF}' )
+# Data params
+NUM_SEQUENCES=${NUM_SEQUENCES:-128}
 # Quantization params
 FORMAT=${FORMAT:-"nvfp"}
 W_BITS=${W_BITS:-4}
@@ -36,14 +45,19 @@ A_GROUP_SIZE=${A_GROUP_SIZE:-16}
 GPTQ=${GPTQ:-0}
 W_OBSERVER=${W_OBSERVER:-"minmax"}
 QUANTIZATION_ORDER=${QUANTIZATION_ORDER:-"default"}
+# Save params
+EXPORT_QUANTIZATION=${EXPORT_QUANTIZATION:-""}
 # Transform params
 TRANSFORM_CLASS=${TRANSFORM_CLASS:-"identity"}
+HADAMARD_GROUP_SIZE=${HADAMARD_GROUP_SIZE:-128}
 # Evaluation params
 EVAL_PERPLEXITY=${EVAL_PERPLEXITY:-1}
 EVAL_OPENLLM=${EVAL_OPENLLM:-0}
+LM_EVAL_BATCH_SIZE=${LM_EVAL_BATCH_SIZE:-"auto"}
 # Misc params
 LOG_WANDB=${LOG_WANDB:-0}
 DTYPE=${DTYPE:-"auto"}
+CPU_OFFLOAD_ACTIVATIONS=${CPU_OFFLOAD_ACTIVATIONS:-0}
 
 SCRIPT_ARGS=""
 
@@ -70,14 +84,24 @@ else
     METHOD_NAME="RTN"
 fi
 
-export WANDB_ENTITY=<fill>
-export WANDB_PROJECT=<fill>
+if [[ $CPU_OFFLOAD_MODULES == 1 ]]; then
+    SCRIPT_ARGS="${SCRIPT_ARGS} --cpu_offload_modules"
+fi
 
-if [[ $W_BITS == 16 ]]; then
-    export WANDB_NAME=${MODEL}
-else
-    export WANDB_NAME=${MODEL}/${FORMAT}-w${W_BITS}g${W_GROUP_SIZE}-a${A_BITS}g${A_GROUP_SIZE}-${METHOD_NAME}-${TRANSFORM_CLASS}-transform
-    SCRIPT_ARGS="${SCRIPT_ARGS} --save_path quantized_models/${MODEL_ID}-${FORMAT}-w${W_BITS}g${W_GROUP_SIZE}-a${A_BITS}${A_GROUP_SIZE}-${METHOD_NAME}-${TRANSFORM_CLASS}-transform"
+if [[ $CPU_OFFLOAD_ACTIVATIONS == 1 ]]; then
+    SCRIPT_ARGS="${SCRIPT_ARGS} --cpu_offload_activations"
+fi
+
+export WANDB_PROJECT="FP-Quantization-Harness"
+export WANDB_NAME=${MODEL}/${FORMAT}-w${W_BITS}-a${A_BITS}-${METHOD_NAME}-${TRANSFORM_CLASS}-transform
+
+if [[ $EXPORT_QUANTIZATION == "realquant" || $EXPORT_QUANTIZATION == "pseudoquant" ]]; then
+    SCRIPT_ARGS="${SCRIPT_ARGS} --export_quantized_model ${EXPORT_QUANTIZATION}"
+    if [[ $EXPORT_QUANTIZATION == "realquant" ]]; then
+        SAVE_DIR=quantized_models
+    else
+        SAVE_DIR=pseudoquantized_models
+    fi
 fi
 
 python model_quant.py \
@@ -92,79 +116,121 @@ python model_quant.py \
     --quantization_order=${QUANTIZATION_ORDER} \
     $SCRIPT_ARGS \
     --hadamard_group_size=${HADAMARD_GROUP_SIZE} \
-    --dataset_name_or_path=c4 \
+    --dataset_name_or_path=fineweb-edu \
+    --num_sequences=${NUM_SEQUENCES} \
     --sequence_length=2048 \
     --dtype=${DTYPE} \
+    --lm_eval_batch_size=${LM_EVAL_BATCH_SIZE} \
+    --save_path "${SAVE_DIR}/${MODEL_ID}-${FORMAT}-w${W_BITS}-a${A_BITS}-${METHOD_NAME}-${TRANSFORM_CLASS}-transform" \
+    --export_quantized_model pseudoquant \
+    --cpu_offload_activations \
+    --cpu_offload_modules \
+    --fuse_global_scale \
     --amp
 ```
 
 Above:
-* `--model_name_or_path` - The model to quantize. (currently only Llama and Qwen models are supported)
-* `--format` - The quantization format.
+* `--model_name_or_path` - The model to quantize. (Llama and Qwen3 models are supported)
+* `--format` - The quantization format (int, fp, mxfp, nvfp). 
 * `--w_bits` - The number of bits to quantize the weights to.
 * `--a_bits` - The number of bits to quantize the activations to.
 * `--w_group_size` - The number of weights to quantize together.
-* `--w_observer` - The observer to use for the weights (`mse` or `minmax`).
 * `--a_group_size` - The number of activations to quantize together.
-* `--parametrization` - Transform parameterization.
-* `--gptq` - Whether to use GPTQ quantization for the weights.
-* `--transform_class` - Transform class (`identity` or `hadamard`).
-* `--dataset_name_or_path` - Dataset to use.
-* `--sequence_length` - Sequence length.
+* `--init` - Transform initialization.
+* `--transform_class` - Transform class. We provide the following options:
+    * `identity` - Identity transform
+    * `hadamard` - Hadamard transform
+    * `dct` - Discrete cosine transform
+    * `dst` - Discrete sine transform
+    * `fast_food` - Fast food transform
+    * `gsr` - Grouped sequency aligned transform
+* `--hadamard_group_size` - Transform group size.
+* `--dataset_name_or_path` - Dataset to use for calibration.
+* `--sequence_length` - Calibration sequence length.
 * `--dtype` - Data type to load the model.
-* `--amp` - Use automatic mixed precision.
-* `--save_path` - Path to save the quantized model.
-* `--real_quant` - Whether to save model in real quantization format.
-* `--eval_perplexity` - Whether to compute perplexity.
-* `--eval_openllm` - Whether to compute OpenLLMv1 scores.
+* `--amp` - Whether to use automatic mixed precision.
+* `--export_quantized_model` - Whether to export quantized model in `realquant` or `pseudoquant` format. The former allows one to run quantized model with the help of [QuTLASS](https://github.com/IST-DASLab/qutlass) integration, while the latter produces fake quantized model runnable with `triton` kernels.
 
-`real_quant` option produces models that are runnable on Blackwell architectures (`sm_120`) via transformers and vLLM (currently using the transformers [fork](https://github.com/huggingface/transformers/pull/38696/)).
+For evaluation, we provide the following options:
 
-
-
-### Accuracy Evaluations
-
-The results below provide the evaluation results for quantized Llama-3 and Qwen-3 models 
-on the OpenLLM v1 leaderboard. Specifically, we provide average metrics for the following tasks:
-* `mmlu_cot_llama` (exact_match, strict_match)
-* `arc_challenge_llama` (exact_match, strict_match)
-* `gsm8k_llama` (exact_match, strict_match)
-* `hellaswag` (acc_norm)
-* `winogrande` (acc)
-* `truthfulqa_mc2` (acc)
-
-The results for Qwen3 exclude `arc_challenge_llama` as it turns out to be very noisy. 
-
-Below left column corresponds to **weight-only** quantization, right column corresponds to **weight-and-activation** quantization. Results for AWQ were produced via the dedicated [AutoAWQ fork](https://github.com/Godofnothing/AutoAWQ-FP).
-
-**Llama-3.1-8B-Instruct**
-
-<p float="left">
-  <img src="assets/llama-3.1-8b-acc-weight_only.png" width="400" />
-  <img src="assets/llama-3.1-8b-acc-weight_and_activation.png" width="400" />
-</p>
-
-**Qwen-3-8B**
-
-<p float="left">
-  <img src="assets/qwen3-3-8b-acc-weight_only.png" width="400" />
-  <img src="assets/qwen3-3-8b-acc-weight_and_activation.png" width="400" />
-</p>
-
-*Notes*. For NVFP format without `hadamard` rotation GPTQ's average performance is below 0.65. 
-By and large, `GPTQ+Had` appears to be the best method for preserving accuracy.  
+* `--eval_perplexity` - Whether to evaluate perplexity after quantization.
+* `--eval_openllm` - Whether to evaluate OpenLLM v1 openllm after quantization.
+* `--lm_eval_batch_size` - LM eval batch size to evaluate after quantization.
+* `--fuse_global_scale` - Whether to fuse global scale in qkv and gate_up projections as required by `vLLM`.
 
 
-### Inference speedups
+We note, however, that the evaluation within quantization script is not optimized and may take several days.
+The recommended way to evaluate models is to export the quantized model and evaluate it via `vLLM` integration.
 
-Below we provide some performance numbers for end-2-end inference with QuTLASS kernels vs `bf16` baseline for Qwen3 models, on an RTX 5090 GPU.
-Please see the [QuTLASS](https://github.com/IST-DASLab/qutlass) repository for details on how to reproduce this. 
+*Evaluation*
 
-<p float="left">
-  <img src="assets/inference_speedup_qwen3_8b.png" width="400" />
-  <img src="assets/inference_speedup_qwen3_14b.png" width="400" />
-</p>
+Below is an example of the bash evaluation script usage:
 
-### Contributors 
+```shell
+export OMP_NUM_THREADS=8
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
 
-This project is still in active development. So far, it has benefitted from contributions from Denis Kuznedelev, Andrei Panferov, Vage Egiazarian, Saleh Ashkboos, as well as Dan Alistarh, Michael Goin and Eldar Kurtic. The [QuTLASS](https://github.com/IST-DASLab/qutlass) repository is developed primarily by Roberto Lopez Castro, with help from Jiale Chen. 
+NUM_GPUS=$( echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l )
+GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.8}
+
+MODEL_ID=$( echo $MODEL | awk -F/ '{print $NF}' )
+MODEL_ARGS="pretrained=$MODEL,max_model_len=4096,tensor_parallel_size=$NUM_GPUS,dtype=auto,gpu_memory_utilization=${GPU_MEMORY_UTILIZATION},enforce_eager=True"
+
+# Winogrande
+lm_eval \
+  --model vllm \
+  --model_args $MODEL_ARGS \
+  --tasks winogrande \
+  --num_fewshot=5 \
+  --batch_size auto \
+  --output_path lm_eval_results
+
+# Hellaswag
+lm_eval \
+  --model vllm \
+  --model_args $MODEL_ARGS \
+  --tasks hellaswag \
+  --num_fewshot=10 \
+  --batch_size auto \
+  --output_path lm_eval_results
+
+# GSM8k
+lm_eval \
+  --model vllm \
+  --model_args $MODEL_ARGS \
+  --tasks gsm8k_llama \
+  --apply_chat_template \
+  --fewshot_as_multiturn \
+  --batch_size auto \
+  --output_path lm_eval_results
+
+# MMLU-CoT 
+lm_eval \
+  --model vllm \
+  --model_args $MODEL_ARGS \
+  --tasks mmlu_cot_llama \
+  --apply_chat_template \
+  --fewshot_as_multiturn \
+  --batch_size auto \
+  --output_path lm_eval_results
+```
+
+### Environment setup
+
+Coming soon...
+
+### Citation
+
+If you find this project useful, please cite our paper:
+
+```
+@misc{egiazarian2025bridginggappromiseperformance,
+      title={Bridging the Gap Between Promise and Performance for Microscaling FP4 Quantization}, 
+      author={Vage Egiazarian and Roberto L. Castro and Denis Kuznedelev and Andrei Panferov and Eldar Kurtic and Shubhra Pandit and Alexandre Marques and Mark Kurtz and Saleh Ashkboos and Torsten Hoefler and Dan Alistarh},
+      year={2025},
+      eprint={2509.23202},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2509.23202}, 
+}
+```

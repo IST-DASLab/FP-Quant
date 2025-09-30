@@ -68,9 +68,13 @@ class QLinear(nn.Linear):
         if self.weight_quantizer is not None:
             w_scales, w_zeros = self.weight_quantizer.get_quantization_params(weight)
             weight = self.weight_quantizer(weight, w_scales, w_zeros)
+            self.weight_quantizer._track_global_scale = False
+
+        if self.act_quantizer is not None:
+            self.act_quantizer._track_global_scale = False
 
         self.weight.data = weight
-        if bias:
+        if bias is not None:
             self.bias.data = bias
 
         self._train_mode = False

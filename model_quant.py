@@ -1,7 +1,8 @@
 import os
 import json
-import math
 import argparse
+import warnings
+from functools import partial
 
 import torch
 from safetensors.torch import save_file
@@ -36,7 +37,7 @@ def auto_or_int(value):
         raise argparse.ArgumentTypeError(f"Must be 'auto' or an integer, got '{value}'")
 
 
-def save_quantized_model(model, quantized_state_dict, args):
+def export_quantized_model(model, quantized_state_dict, non_quantized_state_dict, args):
     config = model.config
     # Prepare directory to save model
     os.makedirs(args.save_path, exist_ok=True)
@@ -53,12 +54,17 @@ def save_quantized_model(model, quantized_state_dict, args):
             if f"{prefix}{layer_name}" in quantized_state_dict and param_name == "weight":
                 for k_compr, v_compr in quantized_state_dict[f"{prefix}{layer_name}"].items():
                     model_state_dict[f"{prefix}{layer_name}.{k_compr}"] = v_compr.cpu()
+            elif f"{prefix}{k}" in non_quantized_state_dict:
+                model_state_dict[f"{prefix}{k}"] = non_quantized_state_dict[f"{prefix}{k}"].cpu()
             else:
                 model_state_dict[f"{prefix}{k}"] = v.cpu()
 
+    # Add non_quantized_state_dict block parameters (dict is non-empty for blockwise_qat)
+    model_state_dict.update(non_quantized_state_dict)
+
     # Process all remaining blocks
     tie_word_embeddings = getattr(model.config, "tie_word_embeddings", False)
-    
+
     for k, v in model.state_dict().items():
         if not (k.startswith("model.layers") or (k == "lm_head.weight" and tie_word_embeddings)):
             model_state_dict[k] = v.cpu()
@@ -102,7 +108,11 @@ def save_quantized_model(model, quantized_state_dict, args):
         json.dump({"metadata": {}, "weight_map": safetensors_index}, f)
 
     # Add quantization metadata
-    config.quantization_config = prepare_quantization_config(args.w_group_size, args.format)
+    config.quantization_config = prepare_quantization_config(
+        args.hadamard_group_size, 
+        args.format,
+        pseudoquantization=(args.export_quantized_model == "pseudoquant")
+    )
     # Save configs
     config.save_pretrained(args.save_path)
     model.generation_config.save_pretrained(args.save_path)
@@ -132,7 +142,7 @@ def parse_args():
     )
     parser.add_argument(
         "--num_sequences", 
-        default=128, 
+        default=1024, 
         type=int, 
         help="Number of calibration sequences."
     )
@@ -204,15 +214,11 @@ def parse_args():
         help="Activation observer.",
     )
     parser.add_argument(
-        "--real_quant",
-        action="store_true",
-        help="Whether to apply real quantization to model."
-    )
-    parser.add_argument(
-        "--mxfp_scale_factor",
-        type=float,
-        default=0.75, # Tseng scaling factor
-        help="MXFP scale scaling factor for MXFP quantization."
+        "--export_quantized_model",
+        type=str,
+        default="",
+        choices=["", "realquant", "pseudoquant"],
+        help="Whether export quantized model in realquant or pseudoquant format.",
     )
     # GPTQ params
     parser.add_argument(
@@ -235,6 +241,12 @@ def parse_args():
         default="identity",
         choices=TRANSFORMS.keys(),
         help="The transform class."
+    )
+    parser.add_argument(
+        "--hadamard_group_size",
+        type=int,
+        default=128,
+        help="Hadamard group size"
     )
     # Logging params
     parser.add_argument(
@@ -259,6 +271,7 @@ def parse_args():
     parser.add_argument("--cpu_offload_activations", action="store_true", help="whether to offload activations to CPU.")
     parser.add_argument("--amp", action="store_true", help="whether to enable fp16 autocasting.")
     parser.add_argument("--compile", action="store_true", help="whether to use torch.compile.")
+    parser.add_argument("--fuse_global_scale", action="store_true", help="whether to fuse global scale in qkv and gate_up.")
     # Eval params
     parser.add_argument("--eval_perplexity", action="store_true", help="whether to eval perplexity after quantization.")
     parser.add_argument("--eval_openllm", action="store_true", help="whether to eval OpenLLM v1 openllm after quantization.")
@@ -273,23 +286,13 @@ def parse_args():
         "--lm_eval_tasks",
         nargs="+",
         type=str,
-        default=["arc_easy", "arc_challenge", "winogrande", "piqa", "hellaswag"],
-        help="LM eval tasks to evaluate after quantization.",
+        default=["mmlu_cot_llama", "arc_challenge_llama", "gsm8k_llama", "hellaswag", "winogrande", "truthfulqa"],
+        help="OpenLLMv1 tasks to evaluate after quantization."
     )
     parser.add_argument(
-        "--lm_eval_add_bos_token", 
+        "--disable_thinking",
         action="store_true",
-        help="whether to add bos token in evaluation."
-    )
-    parser.add_argument(
-        "--lm_eval_apply_chat_template",
-        action="store_true",
-        help="whether to apply chat template."
-    )
-    parser.add_argument(
-        "--lm_eval_fewshot_as_multiturn",
-        action="store_true",
-        help="whether to process fewshot as multiturn." 
+        help="Whether to disable thinking mode for Qwen3.",
     )
     # Save params
     parser.add_argument(
@@ -327,15 +330,15 @@ def parse_args():
         if args.scale_precision != "e8m0":
             args.scale_precision = "e8m0"
             print(f"Changed scale precision to e8m0 for mxfp format.")
-    # Check equality of w_group_size and a_group_size
-    assert args.w_group_size == args.a_group_size, "w_group_size and a_group_size must be equal."
     # Check logging
     if args.log_wandb:
         assert wandb is not None, "wandb is not installed. Please install wandb `pip install wandb`."
     # Check real_quant config
-    if args.real_quant:
-        assert args.format in "mxfp", "Real quantization is only supported for mxfp format."
-    
+    if args.export_quantized_model:
+        assert args.save_path is not None, "`save_path` must be specified when exporting quantized model."
+        assert args.format in ["nvfp", "mxfp"], "`export_quantization` is only supported for nvfp and mxfp formats."
+        assert args.w_bits == 4, "`export_quantization` is only supported for 4 bit weights."
+        assert args.a_bits == 4, "`export_quantization` is only supported for 4 bit activations."
     return args
 
 
@@ -355,7 +358,7 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name_or_path, 
         torch_dtype=args.dtype, 
-        device_map=None if args.cpu_offload_modules else device, 
+        device_map=None if args.cpu_offload_modules else device,
         low_cpu_mem_usage=True,
     )
     model.config.use_cache = False
@@ -365,32 +368,35 @@ def main():
     # Sanity check
     if args.eval_openllm:
         assert hasattr(tokenizer, 'chat_template') and tokenizer.chat_template is not None, "OpenLLM v1 works only with chat template."
+        if args.disable_thinking:
+            if model.config.model_type == "qwen3":
+                tokenizer.apply_chat_template = partial(
+                    tokenizer.apply_chat_template, 
+                    enable_thinking=False
+                )
+            else:
+                warnings.warn("`disable_thinking` has no effect on non-Qwen3 models.")
 
     quantize_anything = args.w_bits < 16 or args.a_bits < 16
 
+    # Prepare calibration data
+    calibration_data = get_data(
+        args.dataset_name_or_path,
+        tokenizer,
+        args.sequence_length,
+        args.num_sequences,
+        args.seed
+    )
+
     if quantize_anything:
         if args.gptq:
-            calibration_data = get_data(
-                args.dataset_name_or_path,
-                tokenizer,
-                args.sequence_length,
-                args.num_sequences,
-                args.seed
-            )
-            quantized_state_dict = gptq_quantization(model, calibration_data, args, device=device)
+            quantized_state_dict, non_quantized_state_dict = gptq_quantization(model, calibration_data, args, device)
         else:
-            quantized_state_dict = rtn_quantization(model, args, device)
+            quantized_state_dict, non_quantized_state_dict = rtn_quantization(model, calibration_data, args, device)
 
-        if args.save_path:
-            # Custom saving function
-            if args.real_quant:
-                save_quantized_model(model, quantized_state_dict, args)
-            else:
-                model.save_pretrained(args.save_path)  
+        if args.export_quantized_model:
+            export_quantized_model(model, quantized_state_dict, non_quantized_state_dict, args) 
             tokenizer.save_pretrained(args.save_path)
-            
-    # Set to eval mode
-    model.requires_grad_(False).eval()
 
     if args.compile:
         model = torch.compile(model)
@@ -414,35 +420,34 @@ def main():
             tokenizer=tokenizer, 
             batch_size=args.lm_eval_batch_size,
             max_length=4096, # from open LLM openllm
-            add_bos_token=args.lm_eval_add_bos_token
         )
         task_manager = lm_eval.tasks.TaskManager()
 
-        # MMLU CoT Llama-3.1
-        results.update(
-            lm_eval.simple_evaluate(
+        # Winogrande (5-shot)
+        if "winogrande" in args.lm_eval_tasks:
+            task_results = lm_eval.simple_evaluate(
                 model=lm,
-                tasks="mmlu_cot_llama",
+                tasks="winogrande",
+                num_fewshot=5,
                 batch_size=args.lm_eval_batch_size,
-                apply_chat_template=True,
-                fewshot_as_multiturn=True,
                 task_manager=task_manager,
             )["results"]
-        )
-        # ArcC Llama-3.1
-        results.update(
-            lm_eval.simple_evaluate(
+            results.update(task_results)
+            print(make_table({"results": task_results, "versions": {}, "n-shot": {}, "higher_is_better": {}}))
+        # Hellaswag (10-shot)
+        if "hellaswag" in args.lm_eval_tasks:
+            task_results = lm_eval.simple_evaluate(
                 model=lm,
-                tasks="arc_challenge_llama",
+                tasks="hellaswag",
+                num_fewshot=10,
                 batch_size=args.lm_eval_batch_size,
-                apply_chat_template=True,
-                fewshot_as_multiturn=True,
                 task_manager=task_manager,
             )["results"]
-        )
+            results.update(task_results)
+            print(make_table({"results": task_results, "versions": {}, "n-shot": {}, "higher_is_better": {}}))
         # GSM8K Llama-3.1
-        results.update(
-            lm_eval.simple_evaluate(
+        if "gsm8k_llama" in args.lm_eval_tasks:
+            task_results = lm_eval.simple_evaluate(
                 model=lm,
                 tasks="gsm8k_llama",
                 batch_size=args.lm_eval_batch_size,
@@ -450,42 +455,25 @@ def main():
                 fewshot_as_multiturn=True,
                 task_manager=task_manager,
             )["results"]
-        )
-        # Hellaswag (10-shot)
-        results.update(
-            lm_eval.simple_evaluate(
+            results.update(task_results)
+            print(make_table({"results": task_results, "versions": {}, "n-shot": {}, "higher_better": {}}))
+        # MMLU CoT Llama-3.1
+        if "mmlu_cot_llama" in args.lm_eval_tasks:
+            task_results = lm_eval.simple_evaluate(
                 model=lm,
-                tasks="hellaswag",
-                num_fewshot=10,
+                tasks="mmlu_cot_llama",
                 batch_size=args.lm_eval_batch_size,
+                apply_chat_template=True,
+                fewshot_as_multiturn=True,
                 task_manager=task_manager,
             )["results"]
-        )
-        # Winogrande (5-shot)
-        results.update(
-            lm_eval.simple_evaluate(
-                model=lm,
-                tasks="winogrande",
-                num_fewshot=5,
-                batch_size=args.lm_eval_batch_size,
-                task_manager=task_manager,
-            )["results"]
-        )
-        # TruthfulQA (0-shot)
-        results.update(
-            lm_eval.simple_evaluate(
-                model=lm,
-                tasks="truthfulqa",
-                num_fewshot=0,
-                batch_size=args.lm_eval_batch_size,
-                task_manager=task_manager,
-            )["results"]
-        )
-
+            results.update(task_results)
+            print(make_table({"results": task_results, "versions": {}, "n-shot": {}, "higher_better": {}}))
         # Log results
         if args.log_wandb:
             wandb.log({"eval/openllm": results}) 
         # Print formatted table
+        print("### Final results ###")
         print(make_table({"results": results, "versions": {}, "n-shot": {}, "higher_is_better": {}}))
 
 

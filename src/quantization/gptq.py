@@ -1,3 +1,4 @@
+import re
 import gc
 import math
 import argparse
@@ -5,14 +6,13 @@ from typing import List, Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.nn.modules.conv import _ConvNd
 from transformers import AutoModelForCausalLM
 
 from .qlinear import QLinear
 from .quantizer import Quantizer
 from .quant_args import QuantizationOrder
-from .quant_ops import pack_fp4_to_uint8, prepare_scales_for_saving
+from .quant_ops import pack_fp4_to_uint8, cast_scales_to_eXmY, ScalePrecision
 from .accumulate_hessian import accumulate_hessian
 from ..transforms.transforms import build_transform, get_transform_matrix
 from ..utils.linalg_utils import inv_sym
@@ -39,7 +39,7 @@ class GPTQ:
         quantization_order: str = "default",
         block_size: int = 128,
         rel_damp: float = 1e-2,
-        real_quant: bool = False,
+        export_quantized_model: str = "",
     ):
         self._validate_layer(layer)
         self.layer = layer
@@ -58,7 +58,7 @@ class GPTQ:
         self.H = None
         self.num_samples = 0
         # Whether to apply real quantization
-        self.real_quant = real_quant
+        self.export_quantized_model = export_quantized_model
 
     @staticmethod
     def _validate_layer(layer):
@@ -136,7 +136,7 @@ class GPTQ:
 
         # Init quantized weight
         qweight = None
-        if self.real_quant:
+        if self.export_quantized_model:
             qweight = torch.empty(self.W.shape, device=device, dtype=dtype)
         # Get scales and zeros 
         scales, zeros = self.quantizer.get_quantization_params(self.W) 
@@ -172,7 +172,7 @@ class GPTQ:
                 else:
                     g_idx = (c1 + i) // group_size    
                 # Quantize weight column
-                if self.real_quant:
+                if self.export_quantized_model:
                     q = self.quantizer.quantize(w_ci, scales[:, g_idx], zeros[:, g_idx])
                     w_q = self.quantizer.dequantize(q, scales[:, g_idx], zeros[:, g_idx])
                     qweight[:, c1 + i] = q
@@ -182,11 +182,14 @@ class GPTQ:
                 # Update subsequent weight
                 err = (w_ci - w_q) / d
                 w_blk[:, i:].addr_(err, H_inv_cho_blk[i, i:], alpha=-1)
+                errs[:, i] = err
             # 3) Update the weights after block
             w[:, c2:].addmm_(errs, H_inv_cho[c1:c2, c2:], alpha=-1)
 
         # Invert permutation
         w = w[:, perm_inv].contiguous()
+        if qweight is not None:
+            qweight = qweight[:, perm_inv].contiguous()
         self.H = self.H[perm_inv][:, perm_inv]
         # Restore quantizer group size
         self.quantizer.group_size = quantizer_group_size
@@ -212,8 +215,6 @@ class GPTQ:
             H_inv_cho = torch.linalg.cholesky(H, upper=True)
         except:
             H_inv_cho = torch.eye(self.d_col, device=H.device, dtype=torch.float32)
-        # Divide Hessian inverse by diagonal (in order to not divide on it later)
-        H_inv_cho.div_(H_inv_cho.diag()[:, None])
         return H_inv_cho
 
     def quantize(self) -> torch.Tensor | Optional[torch.Tensor] | torch.Tensor:
@@ -226,52 +227,52 @@ def gptq_quantization(
     calibration_data: List[torch.Tensor],
     args: argparse.Namespace, 
     device: torch.device
-) -> Optional[dict[str, torch.Tensor]]:
+) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
     print("GPTQ quantization...")
     orig_dtype = model.config.torch_dtype if args.dtype == "auto" else args.dtype
-    activation_offload_device = "cpu" if args.cpu_offload_activations else None
+    act_offload_device = "cpu" if args.cpu_offload_activations else device
     # State dict with quantized weights, scales and hadamards
     quantized_state_dict = {}
+    non_quantized_state_dict = {}
     # Define common transform kwargs
-    transform_kwargs = dict(group_size=args.w_group_size)
-    # Init quantizers
-    weight_quantizer = None
+    transform_kwargs = dict(device=device, group_size=args.hadamard_group_size)
+    # Init quantizer kwargs
+    weight_quantizer_kwargs = None
     if args.w_bits < 16:
-        weight_quantizer = Quantizer(
+        weight_quantizer_kwargs = dict(
             bits=args.w_bits, 
             symmetric=True, 
             format=args.format,
             granularity=args.w_granularity,
             observer=args.w_observer, 
             group_size=args.w_group_size,
-            scale_precision=args.scale_precision,
-            scale_factor=args.mxfp_scale_factor
+            scale_precision=args.scale_precision
         )
-    act_quantizer = None
+    act_quantizer_kwargs = None
     if args.a_bits < 16:
-        act_quantizer = Quantizer(
-            bits=args.a_bits, 
+        act_quantizer_kwargs = dict(
+            bits=args.a_bits,
             symmetric=True, 
             format=args.format,
             granularity=args.a_granularity,
             observer=args.a_observer, 
             group_size=args.a_group_size,
-            scale_precision=args.scale_precision,
-            scale_factor=args.mxfp_scale_factor
+            scale_precision=args.scale_precision
         )
 
     blocks = model.model.layers
-    blocks[0] = blocks[0].to(device)
-    blocks[0] = InputCollector(blocks[0], cpu_offload=activation_offload_device)
-
+    blocks[0] = InputCollector(blocks[0], cpu_offload=args.cpu_offload_activations)
     if args.cpu_offload_modules:
         model.get_input_embeddings().to(device)
+        blocks[0] = blocks[0].to(device)
 
     for sample in calibration_data:
         try:
             with torch.no_grad():
                 model(sample.to(device=device))
         except ForwardInterrupt:
+            if args.cpu_offload_activations:
+                sample = sample.to(device="cpu")
             pass
         
     input_args = blocks[0].input_args
@@ -284,6 +285,8 @@ def gptq_quantization(
     # Iterate over transformer blocks
     for block_idx, block in enumerate(blocks):
         print(f"Processing block {block_idx}...")
+        if args.cpu_offload_modules:
+            block.to(device)
 
         # 1. Init transforms
         qkv_in_transform = build_transform(args.transform_class, size=model.config.hidden_size, **transform_kwargs)
@@ -295,13 +298,13 @@ def gptq_quantization(
         quantized_attn = get_attention_layer(model.config)(
             model.config,
             layer_idx=block_idx,
-            act_quantizer=act_quantizer,
+            act_quantizer_kwargs=act_quantizer_kwargs,
             qkv_in_transform=qkv_in_transform,
             o_in_transform=o_in_transform
         )
         quantized_mlp = get_mlp_layer(model.config)(
             model.config,
-            act_quantizer=act_quantizer,
+            act_quantizer_kwargs=act_quantizer_kwargs,
             gate_up_in_transform=gate_up_in_transform,
             down_in_transform=down_in_transform
         )
@@ -312,10 +315,16 @@ def gptq_quantization(
         block.self_attn = quantized_attn
         block.mlp = quantized_mlp
 
-        # 3. Move to original device and dtype
+        # Move to original device and dtype
         block = block.to(device=device, dtype=orig_dtype)
         # Toggle off gradients for all parameters
         block.requires_grad_(False)
+
+        # 3. Fix transforms and remove parametrizations
+        qkv_in_transform.remove_parametrizations()
+        o_in_transform.remove_parametrizations()
+        gate_up_in_transform.remove_parametrizations()
+        down_in_transform.remove_parametrizations() 
 
         # 4. Create GPTQ handles and hooks
         gptq_handles = {}
@@ -325,11 +334,28 @@ def gptq_quantization(
                 # Create GPTQ handle
                 gptq_handles[layer_name] = GPTQ(
                     layer, 
-                    weight_quantizer, 
+                    Quantizer(**weight_quantizer_kwargs) if weight_quantizer_kwargs else None, 
                     quantization_order=args.quantization_order, 
                     rel_damp=args.rel_damp,
-                    real_quant=args.real_quant
+                    export_quantized_model=args.export_quantized_model
                 )
+                # Get weight global scale
+                if args.scale_precision == ScalePrecision.E4M3:
+                    # Rotate weight
+                    with torch.no_grad():
+                        if re.search("(q|k|v)_proj", layer_name):
+                            layer_transform = qkv_in_transform
+                        elif re.search("o_proj", layer_name):
+                            layer_transform = o_in_transform
+                        elif re.search("(gate|up)_proj", layer_name):
+                            layer_transform = gate_up_in_transform
+                        else:
+                            layer_transform = down_in_transform
+                        weight = layer_transform(layer.weight, inv_t=True)
+                    
+                    gptq_handles[layer_name].quantizer.get_quantization_params(weight)
+                    # Turn off global scale tracking
+                    gptq_handles[layer_name].quantizer._track_global_scale = False
                 # Attach hook
                 def update_handle_hook(name):
                     def _hook(_, inp, out):
@@ -337,11 +363,29 @@ def gptq_quantization(
                     return _hook
                 hooks[layer_name] = layer.register_forward_hook(update_handle_hook(layer_name))
 
+        # Fuse global scales
+        if args.fuse_global_scale and args.scale_precision == ScalePrecision.E4M3:
+            # qkv fusion
+            qkv_global_scale = min(
+                gptq_handles["self_attn.q_proj"].quantizer.global_scale,
+                gptq_handles["self_attn.k_proj"].quantizer.global_scale,
+                gptq_handles["self_attn.v_proj"].quantizer.global_scale,
+            )
+            gptq_handles["self_attn.q_proj"].quantizer.global_scale = qkv_global_scale
+            gptq_handles["self_attn.k_proj"].quantizer.global_scale = qkv_global_scale
+            gptq_handles["self_attn.v_proj"].quantizer.global_scale = qkv_global_scale
+            # gate_up fusion
+            gate_up_global_scale = min(
+                gptq_handles["mlp.gate_proj"].quantizer.global_scale,
+                gptq_handles["mlp.up_proj"].quantizer.global_scale
+            )
+            gptq_handles["mlp.gate_proj"].quantizer.global_scale = gate_up_global_scale
+            gptq_handles["mlp.up_proj"].quantizer.global_scale = gate_up_global_scale
+
         # 5. Process calibration data
         for inp_args, inp_kwargs in zip(input_args, input_kwargs):
             with torch.no_grad(), torch.amp.autocast(device_type="cuda", enabled=args.amp):
                 block(*to(inp_args, device=device), **to(inp_kwargs, device=device))
-
         # Remove hooks
         for hook in hooks.values():
             hook.remove()
@@ -358,6 +402,8 @@ def gptq_quantization(
         for layer_name, layer in block.named_modules():
             if isinstance(layer, QLinear):
                 layer._train_mode = False
+                if layer.act_quantizer:
+                    layer.act_quantizer._track_global_scale = False
 
         # 7. Run GPTQ quantization
         for layer_name, gptq_handle in gptq_handles.items():
@@ -369,35 +415,50 @@ def gptq_quantization(
             if args.log_wandb:
                 wandb.log({f"gptq/{layer_name}_relative_mse": relative_mse_error.item()})
             gptq_handle.layer.weight.data = dequantized_qweight
+            
             # Update quantized state dict (if needed)
-            if args.real_quant:
-                quantized_state_dict[f"model.layers.{block_idx}.{layer_name}"] = {
-                    "qweight": pack_fp4_to_uint8(qweight),
-                    "scales": prepare_scales_for_saving(scales, args.scale_precision, args.mxfp_scale_factor),
-                    "forward_hadamard_matrix": get_transform_matrix(args.transform_class, args.w_group_size, device, orig_dtype),
-                    "backward_hadamard_matrix": get_transform_matrix(args.transform_class, args.w_group_size, device, orig_dtype)
-                }
+            if args.export_quantized_model:
+                weight_global_scale = gptq_handle.quantizer.global_scale.to(scales.device)
+                act_global_scale = gptq_handle.layer.act_quantizer.global_scale
 
-        # 8. Cast to original dtype
-        block = block.to(dtype=orig_dtype)
+                transform_matrix = get_transform_matrix(args.transform_class, args.hadamard_group_size, device, orig_dtype).cpu()
 
-        # 9. Update activations
+                if args.export_quantized_model == "realquant":
+                    quantized_state_dict[f"model.layers.{block_idx}.{layer_name}"] = {
+                        "qweight": pack_fp4_to_uint8(qweight).cpu(),
+                        "scales": cast_scales_to_eXmY(scales * weight_global_scale, args.scale_precision).cpu(),
+                        "forward_hadamard_matrix": transform_matrix,
+                        "backward_hadamard_matrix": transform_matrix.clone(),
+                        "weight_global_scale": weight_global_scale.clone(),
+                        "act_global_scale": act_global_scale.clone()
+                    }
+                # pseudoquant
+                else:
+                    quantized_state_dict[f"model.layers.{block_idx}.{layer_name}"] = {
+                        "dqweight": dequantized_qweight.cpu(),
+                        "forward_hadamard_matrix": transform_matrix,
+                        "backward_hadamard_matrix": transform_matrix.clone(),
+                        "weight_global_scale": weight_global_scale.clone(),
+                        "act_global_scale": act_global_scale.clone()
+                    }
+
+        # 8. Update activations
         for inp_args, inp_kwargs in zip(input_args, input_kwargs):
             with torch.no_grad(), torch.amp.autocast(device_type="cuda", enabled=args.amp):
                 out = block(*to(inp_args, device=device), **to(inp_kwargs, device=device))
-            out = maybe_first_element(out)
+            out = maybe_first_element(out).to(act_offload_device)
             # change only first input argument
             if len(inp_args) > 0:
-                inp_args[0].data = out.to(activation_offload_device)
+                inp_args[0].data = out
             elif "hidden_states" in inp_kwargs:
-                inp_kwargs["hidden_states"] = out.to(activation_offload_device)
+                inp_kwargs["hidden_states"] = out
             else:
                 raise ValueError("Unsupported block input format.")
 
         if args.cpu_offload_modules:
             block = block.cpu()
 
-        # 10. Clean-up
+        # 8. Clean-up
         del gptq_handles
         del hooks
         gc.collect()
@@ -406,4 +467,4 @@ def gptq_quantization(
     gc.collect()
     torch.cuda.empty_cache()
 
-    return quantized_state_dict
+    return quantized_state_dict, non_quantized_state_dict

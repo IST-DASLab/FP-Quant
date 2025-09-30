@@ -1,4 +1,4 @@
-from typing import Tuple, Optional, Callable
+from typing import Tuple, Optional, Callable, Dict, Any
 
 import torch
 import torch.nn as nn
@@ -20,33 +20,35 @@ class QuantizedQwen3MLP(nn.Module):
     def __init__(
         self, 
         config: Qwen3Config,
-        weight_quantizer: Quantizer = None,
-        act_quantizer: Quantizer = None,
+        weight_quantizer_kwargs: Dict[str, Any] | None = None,
+        act_quantizer_kwargs: Dict[str, Any] | None = None,
         gate_up_in_transform: BaseTransform = IdentityTransform(),
         down_in_transform: BaseTransform = IdentityTransform()
     ):
         super().__init__()
+        # gate, up accept the same input
+        gate_up_act_quantizer = Quantizer(**act_quantizer_kwargs) if act_quantizer_kwargs else None
         # Init layers   
         self.up_proj = QLinear(
             config.hidden_size,
             config.intermediate_size,
             bias=False,
-            weight_quantizer=weight_quantizer,
-            act_quantizer=act_quantizer
+            weight_quantizer=Quantizer(**weight_quantizer_kwargs) if weight_quantizer_kwargs else None,
+            act_quantizer=gate_up_act_quantizer
         )
         self.gate_proj = QLinear(
             config.hidden_size,
             config.intermediate_size,
             bias=False,
-            weight_quantizer=weight_quantizer,
-            act_quantizer=act_quantizer
+            weight_quantizer=Quantizer(**weight_quantizer_kwargs) if weight_quantizer_kwargs else None,
+            act_quantizer=gate_up_act_quantizer
         )
         self.down_proj = QLinear(
             config.intermediate_size,
             config.hidden_size,
             bias=False,
-            weight_quantizer=weight_quantizer,
-            act_quantizer=act_quantizer
+            weight_quantizer=Quantizer(**weight_quantizer_kwargs) if weight_quantizer_kwargs else None,
+            act_quantizer=Quantizer(**act_quantizer_kwargs) if act_quantizer_kwargs else None
         )
         self.act_fn = ACT2FN[config.hidden_act] 
 
@@ -83,8 +85,8 @@ class QuantizedQwen3Attention(nn.Module):
         self, 
         config: Qwen3Config, 
         layer_idx: int,
-        weight_quantizer: Quantizer = None,
-        act_quantizer: Quantizer = None,
+        weight_quantizer_kwargs: Dict[str, Any] | None = None,
+        act_quantizer_kwargs: Dict[str, Any] | None = None,
         qkv_in_transform: BaseTransform = IdentityTransform(),
         o_in_transform: BaseTransform = IdentityTransform()
     ):
@@ -96,26 +98,29 @@ class QuantizedQwen3Attention(nn.Module):
         self.scaling = self.head_dim ** -0.5
         self.attention_dropout = config.attention_dropout
         self.is_causal = True
+
+        # q, k, v accept the same input
+        qkv_act_quantizer = Quantizer(**act_quantizer_kwargs) if act_quantizer_kwargs else None
         
         self.q_proj = QLinear(
             config.hidden_size, config.num_attention_heads * self.head_dim, bias=config.attention_bias,
-            weight_quantizer=weight_quantizer,
-            act_quantizer=act_quantizer
+            weight_quantizer=Quantizer(**weight_quantizer_kwargs) if weight_quantizer_kwargs else None,
+            act_quantizer=qkv_act_quantizer
         )
         self.k_proj = QLinear(
             config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias,
-            weight_quantizer=weight_quantizer,
-            act_quantizer=act_quantizer
+            weight_quantizer=Quantizer(**weight_quantizer_kwargs) if weight_quantizer_kwargs else None,
+            act_quantizer=qkv_act_quantizer
         )
         self.v_proj = QLinear(
             config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias,
-            weight_quantizer=weight_quantizer,
-            act_quantizer=act_quantizer
+            weight_quantizer=Quantizer(**weight_quantizer_kwargs) if weight_quantizer_kwargs else None,
+            act_quantizer=qkv_act_quantizer
         )
         self.o_proj = QLinear(
             config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias,
-            weight_quantizer=weight_quantizer,
-            act_quantizer=act_quantizer
+            weight_quantizer=Quantizer(**weight_quantizer_kwargs) if weight_quantizer_kwargs else None,
+            act_quantizer=Quantizer(**act_quantizer_kwargs) if act_quantizer_kwargs else None
         )
 
         self.q_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)  # unlike olmo, only on the head dim!

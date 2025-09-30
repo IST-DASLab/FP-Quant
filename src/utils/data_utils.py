@@ -28,15 +28,18 @@ def get_c4(
         data_files={'train': 'en/c4-train.00000-of-01024.json.gz'}, 
         split='train'
     )
-    
+    all_id =[]
     trainloader = []
     for _ in range(num_calibration_samples):
         while True:
             i = random.randint(0, len(train_datasetraw) - 1)
+            if i in all_id:
+                continue
             trainenc = tokenizer(train_datasetraw[i]['text'], return_tensors='pt')
             if trainenc.input_ids.shape[1] >= max_sequence_length:
                 break
-        i = random.randint(0, trainenc.input_ids.shape[1] - max_sequence_length - 1)
+        all_id.append(i)
+        i = random.randint(0, trainenc.input_ids.shape[1] - max_sequence_length)
         tokenized_sample = trainenc.input_ids[:, i:i + max_sequence_length]
         trainloader.append(tokenized_sample)
     return trainloader
@@ -105,7 +108,6 @@ def get_open_platypus(
     train_dataset = [torch.tensor(sample['input_ids']).unsqueeze(0) for sample in train_dataset]
     return train_dataset
 
-
 def get_fineweb_edu(
     tokenizer: AutoTokenizer, 
     max_sequence_length: int,
@@ -114,19 +116,20 @@ def get_fineweb_edu(
 ) -> List[torch.Tensor]:
     train_dataset_raw = load_dataset("HuggingFaceFW/fineweb-edu", "sample-10BT", split="train", streaming=True)
     train_dataset_raw = train_dataset_raw.shuffle(seed=seed, buffer_size=1_000)
-    train_dataset = []
-    for i, sample in enumerate(train_dataset_raw):
-        if i == num_calibration_samples:
-            break
-        tokenized_sample = tokenizer(
-            sample["text"], 
-            max_length=max_sequence_length, 
-            truncation=True, 
+    trainloader = []
+    for j, sample in enumerate(train_dataset_raw):
+        trainenc = tokenizer(
+            sample['text'],
             return_tensors="pt"
         )
-        train_dataset.append(tokenized_sample['input_ids'])
-    return train_dataset
-
+        if trainenc.input_ids.shape[1] < max_sequence_length:
+            continue
+        i = random.randint(0, trainenc.input_ids.shape[1] - max_sequence_length)
+        tokenized_sample = trainenc.input_ids[:, i:i + max_sequence_length]
+        trainloader.append(tokenized_sample)
+        if len(trainloader)>=num_calibration_samples:
+            break
+    return trainloader
 
 def get_ultrachat_200k(
     tokenizer: AutoTokenizer, 
@@ -154,6 +157,47 @@ def get_ultrachat_200k(
     train_dataset = [torch.tensor(sample['input_ids']).unsqueeze(0) for sample in train_dataset]
     return train_dataset
 
+def get_tulu3_sft_mixture(
+    tokenizer: AutoTokenizer, 
+    max_sequence_length: int,
+    num_calibration_samples: Optional[int] = None,
+    seed: int = 42
+) -> List[torch.Tensor]:
+    # Load raw dataset
+    train_dataset_raw = load_dataset("allenai/tulu-3-sft-mixture", split="train")
+
+    # Optionally subsample early for efficiency
+    if num_calibration_samples:
+        train_dataset_raw = train_dataset_raw.shuffle(seed=seed).select(range(num_calibration_samples))
+
+    # Preprocess into chat text
+    def preprocess(example):
+        return {
+            "text": tokenizer.apply_chat_template(
+                example["messages"], tokenize=False
+            )
+        }
+
+    train_dataset_raw = train_dataset_raw.map(preprocess)
+
+    # Tokenize into input_ids
+    def tokenize(sample):
+        tokenized = tokenizer(
+            sample["text"],
+            padding=False,
+            max_length=max_sequence_length,
+            truncation=True,
+            add_special_tokens=False,
+        )
+        return tokenized
+
+    tokenized_dataset = train_dataset_raw.map(tokenize, remove_columns=train_dataset_raw.column_names)
+
+    # Convert to list of tensors
+    train_dataset = [torch.tensor(sample['input_ids']).unsqueeze(0) for sample in tokenized_dataset]
+
+    return train_dataset
+
 
 def get_data(
     dataset_name: str, 
@@ -172,5 +216,7 @@ def get_data(
         return get_fineweb_edu(tokenizer, max_sequence_length, num_calibration_samples, seed)
     if dataset_name == "c4":
         return get_c4(tokenizer, max_sequence_length, num_calibration_samples, seed)
+    if dataset_name == "tulu":
+        return get_tulu3_sft_mixture(tokenizer, max_sequence_length, num_calibration_samples, seed)
     else:
         raise ValueError("Unknown dataset")
