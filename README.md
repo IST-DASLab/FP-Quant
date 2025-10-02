@@ -4,7 +4,7 @@
 
 The official implementation for the paper [Bridging the Gap Between Promise and Performance for Microscaling FP4 Quantization](https://arxiv.org/abs/2509.23202).
 
-This repository contains the code needed to reproduce the results presented in the paper, and it also offers the ability to export quantized models with QuTLASS kernels in the **MXFP4** and **NVFP4 formats**. The exported models can be run either with Hugging Face Transformers or with vLLM.
+This repository contains the code needed to reproduce the results presented in the paper, and it also offers the ability to export quantized models with [QuTLASS](https://github.com/IST-DASLab/qutlass) kernels in the **MXFP4** and **NVFP4 formats**. The exported models can be run either with Hugging Face Transformers or with vLLM.
 
 ### Repository structure
 ---
@@ -166,6 +166,8 @@ The recommended way to evaluate models is to export the quantized model and eval
 
 *Evaluation*
 
+We evaluate the compressed models on a subset of the tasks from OpenLLM v1 benchmark using the recommended parameters.
+
 Below is an example of the bash evaluation script usage:
 
 ```shell
@@ -218,10 +220,12 @@ lm_eval \
 ```
 
 ### Environment setup
+---
 
 Coming soon...
 
 ### Citation
+---
 
 If you find this project useful, please cite our paper:
 
