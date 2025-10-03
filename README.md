@@ -222,7 +222,16 @@ lm_eval \
 ### Environment setup
 ---
 
-Coming soon...
+**Inference Engines**
+
+FP-Quant has support implemented in:
+ - `transformers` with these features:
+     - Available in `main` ([Documentation](https://huggingface.co/docs/transformers/main/en/quantization/fp_quant#fp-quant)).
+     - RTN on-the-fly quantization.
+     - Pseudo-quantization QAT.
+ - `vLLM` with these features:
+     - Available in [this PR](https://github.com/vllm-project/vllm/pull/24440).
+     - Compatible with real quantization models from `FP-Quant` and the `transformers` integration.
 
 ### Citation
 ---
