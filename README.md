@@ -233,6 +233,11 @@ FP-Quant has support implemented in:
      - Available in [this PR](https://github.com/vllm-project/vllm/pull/24440).
      - Compatible with real quantization models from `FP-Quant` and the `transformers` integration.
 
+### FP-Quant models
+---
+
+👉 Check out the quantized MXFP and NVFP models in the [MR-GPTQ](https://huggingface.co/collections/ISTA-DASLab/mr-gptq-68dcde4b1e4b572ded89dbf3) collection on Hugging Face 🤗.
+
 ### Citation
 ---
 
