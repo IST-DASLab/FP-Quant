@@ -17,11 +17,75 @@ The repository is structured as follows:
     ```├── transforms``` - transform functionality \
     ```├── utils``` - utility functions
 
-
-### Usage
+### Environment setup
 ---
 
-*Quantization*
+**Inference Engines**
+
+FP-Quant has support implemented in:
+ - `transformers` with these features:
+     - Available in `main` ([Documentation](https://huggingface.co/docs/transformers/main/en/quantization/fp_quant#fp-quant)).
+     - RTN on-the-fly quantization.
+       ```python
+       from transformers import AutoModelForCausalLM, AutoTokenizer, FPQuantConfig
+       import torch
+        
+       model = AutoModelForCausalLM.from_pretrained(
+            "qwen/Qwen3-8B",
+            quantization_config=FPQuantConfig(forward_dtype="mxfp4"),
+            device_map="auto",
+            dtype=torch.bfloat16,
+        )
+       model.forward = torch.compile(model.forward, mode="max-autotune", fullgraph=True)
+       ```
+     - Pseudo-quantization QAT.
+ - `vLLM` with these features:
+     - Available in [this PR](https://github.com/vllm-project/vllm/pull/24440).
+     - Compatible with real quantization models from `FP-Quant` and the `transformers` integration.
+
+### FP-Quant models
+---
+
+👉 Check out the quantized MXFP and NVFP models in the [MR-GPTQ](https://huggingface.co/collections/ISTA-DASLab/mr-gptq-68dcde4b1e4b572ded89dbf3) collection on Hugging Face 🤗.  
+
+*Example of quantized model inference with HF*
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer, FPQuantConfig
+import torch
+
+model_name = "ISTA-DASLab/Llama-3.1-8B-Instruct-MR-GPTQ-nvfp"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+model = AutoModelForCausalLM.from_pretrained(
+    model_name,
+    device_map="cuda",
+    torch_dtype=torch.bfloat16,
+)
+prompt = "Explain quantization for neural network in simple terms."
+inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
+with torch.inference_mode():
+    output_tokens = model.generate(**inputs,max_new_tokens=150 )
+generated_text = tokenizer.decode(output_tokens[0], skip_special_tokens=True)
+print(generated_text)
+```  
+*Example of quantized model inference with vLLM engine*  
+
+```python
+from vllm import LLM, SamplingParams
+
+model_name = "ISTA-DASLab/Llama-3.1-8B-Instruct-MR-GPTQ-nvfp"
+llm = LLM(model=model_name, dtype="bfloat16", gpu_memory_utilization=0.9)
+sampling_params = SamplingParams(
+    temperature=0.7,       # creativity
+    top_p=0.9,             # nucleus sampling
+    max_tokens=150,        # number of new tokens to generate
+)
+prompt = "Explain quantization for neural networks in simple terms."
+outputs = llm.generate([prompt], sampling_params)
+print(outputs[0].outputs[0].text)
+```
+### Quantization
+---
 
 **NOTE** - The quantization script is designed to be run on a single GPU.
 
@@ -219,24 +283,6 @@ lm_eval \
   --output_path lm_eval_results
 ```
 
-### Environment setup
----
-
-**Inference Engines**
-
-FP-Quant has support implemented in:
- - `transformers` with these features:
-     - Available in `main` ([Documentation](https://huggingface.co/docs/transformers/main/en/quantization/fp_quant#fp-quant)).
-     - RTN on-the-fly quantization.
-     - Pseudo-quantization QAT.
- - `vLLM` with these features:
-     - Available in [this PR](https://github.com/vllm-project/vllm/pull/24440).
-     - Compatible with real quantization models from `FP-Quant` and the `transformers` integration.
-
-### FP-Quant models
----
-
-👉 Check out the quantized MXFP and NVFP models in the [MR-GPTQ](https://huggingface.co/collections/ISTA-DASLab/mr-gptq-68dcde4b1e4b572ded89dbf3) collection on Hugging Face 🤗.
 
 ### Citation
 ---
