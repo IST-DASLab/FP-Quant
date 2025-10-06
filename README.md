@@ -31,7 +31,7 @@ FP-Quant has support implemented in:
        import torch
         
        model = AutoModelForCausalLM.from_pretrained(
-            "qwen/Qwen3-8B",
+            "Qwen/Qwen3-8B",
             quantization_config=FPQuantConfig(forward_dtype="mxfp4"),
             device_map="auto",
             dtype=torch.bfloat16,
