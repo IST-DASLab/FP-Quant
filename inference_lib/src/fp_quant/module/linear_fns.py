@@ -163,6 +163,60 @@ def forward_gemm(x_q, w_q, x_scales, w_scales, alpha, dtype: FPQuantDtype):
         raise ValueError(f"Unsupported dtype: {dtype}")
 
 
+GRID_FP4 = torch.tensor(
+    [
+        0.0,
+        0.5,
+        1.0,
+        1.5,
+        2.0,
+        3.0,
+        4.0,
+        6.0,
+        -0.0,
+        -0.5,
+        -1.0,
+        -1.5,
+        -2.0,
+        -3.0,
+        -4.0,
+        -6.0,
+    ],
+    dtype=torch.bfloat16,
+)
+
+
+def _dq_fp4(x_e2m1: torch.Tensor, x_e8m0: torch.Tensor, alpha):
+    global GRID_FP4
+    device = x_e2m1.device
+    result_shape = x_e2m1.shape[:-1] + (x_e2m1.shape[-1] * 2,)
+
+    GRID_FP4 = GRID_FP4.to(device)
+
+    xq_unpacked = torch.stack([xq & 0xF, xq >> 4], dim=-1).to(torch.int32)
+    x_dequantized = GRID_FP4[xq_unpacked]
+
+    x_fp4_dq = GRID_FP4[x_e2m1_unpacked]
+    scales_dq = x_e8m0.view(torch.float8_e8m0fnu).to(torch.bfloat16)
+
+    x_dq = (x_fp4_dq.view(-1, 32) * scales_dq[..., None]).view(
+        *result_shape
+    ) / alpha.to(torch.bfloat16)
+    return x_dq
+
+
+def _unpack_mask(clip_mask: torch.Tensor) -> torch.Tensor:
+    clip_mask_unpacked_dq = torch.zeros(
+        *clip_mask.shape[:-1],
+        clip_mask.size(-1) * 8,
+        dtype=torch.bool,
+        device=clip_mask.device,
+    )
+    for i in range(8):
+        clip_mask_unpacked_dq[..., i::8] = (clip_mask >> i) & 1
+    return clip_mask_unpacked_dq
+
+
 class FPQuant4x16MasterFn(Function):
     @staticmethod
     def forward(
@@ -209,6 +263,8 @@ class FPQuant4x16MasterFn(Function):
             weight_q,
             x_flat_scales,
             weight_scales,
+            act_global_scale,
+            weight_global_scale,
             x_flat_mask,
             weight_mask,
             forward_hadamard_matrix,
@@ -217,11 +273,45 @@ class FPQuant4x16MasterFn(Function):
         return y
 
     @staticmethod
-    # @torch.compile()
+    @torch.compile()
     def backward(ctx, grad_output: torch.Tensor):
-        raise NotImplementedError(
-            "Backward pass is not implemented for FPQuant4x16MasterFn yet"
+        (
+            x_flat_q,
+            weight_q,
+            x_flat_scales,
+            weight_scales,
+            act_global_scale,
+            weight_global_scale,
+            x_flat_mask,
+            weight_mask,
+            forward_hadamard_matrix,
+        ) = ctx.saved_tensors
+
+        x_flat_dequantized = _dq_fp4(x_flat_q, x_flat_scales, act_global_scale)
+        weight_dequantized = _dq_fp4(weight_q, weight_scales, weight_global_scale)
+        grad_output_flat = grad_output.flatten(end_dim=-2)
+
+        grad_input = torch.einsum("...j,ji->...i", grad_output_flat, weight_dequantized)
+        x_flat_mask = _unpack_mask(x_flat_mask)
+        grad_input = (
+            (grad_input.view(-1, 32) * x_flat_mask.view(-1, 32).to(grad_input.dtype))
+            @ forward_hadamard_matrix.T
+        ).view(ctx.x_shape)
+
+        grad_weight = torch.einsum(
+            "...j,...i->ji", grad_output_flat, x_flat_dequantized
         )
+        weight_mask = _unpack_mask(weight_mask)
+        grad_weight = (
+            (grad_weight.view(-1, 32) * weight_mask.view(-1, 32).to(grad_weight.dtype))
+            @ forward_hadamard_matrix.T
+        ).view(grad_output.size(-1), weight_q.size(-1) * 2)
+
+        grad_bias = (
+            grad_output.flatten(end_dim=-2).sum(dim=0) if ctx.bias_present else None
+        )
+
+        return grad_input, grad_weight, None, None, grad_bias, None, None, None
 
 
 class FPQuant4x16NoMasterFn(Function):

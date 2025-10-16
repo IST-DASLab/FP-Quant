@@ -30,7 +30,7 @@ def get_identity_matrix(group_size: int, dtype: torch.dtype, device: torch.devic
 
 def get_gsr_matrix(group_size: int, dtype: torch.dtype, device: torch.device):
     hadamard_matrix = get_hadamard_matrix(group_size, dtype, device)
-    sign_changes = torch.diff(hadamard_matrix, dim=0).ne(0).sum(dim=0) 
+    sign_changes = torch.diff(hadamard_matrix, dim=0).ne(0).sum(dim=0)
     sorted_indices = torch.argsort(sign_changes)
     return hadamard_matrix[:, sorted_indices].contiguous()
 
@@ -148,15 +148,15 @@ class FPQuantLinear(nn.Module):
     @torch.no_grad()
     def pre_forward(self):
         # Generate rotation matrices
-        assert self.weight.shape[1] % self.config.hadamard_group_size == 0, (
-            f"Weight shape must be divisible by hadamard group size: {self.weight.shape[1]} % {self.config.hadamard_group_size} = {self.weight.shape[1] % self.config.hadamard_group_size}"
-        )
+        assert (
+            self.weight.shape[1] % self.config.hadamard_group_size == 0
+        ), f"Weight shape must be divisible by hadamard group size: {self.weight.shape[1]} % {self.config.hadamard_group_size} = {self.weight.shape[1] % self.config.hadamard_group_size}"
 
-        weight_in_device = (self.weight.data.device.type in ["cuda", "xpu"])
+        weight_in_device = self.weight.data.device.type in ["cuda", "xpu"]
         if not self.config.pseudoquantization:
-            assert weight_in_device, (
-                f"Weight must be on CUDA or XPU, but is on {self.weight.device}"
-            )
+            assert (
+                weight_in_device
+            ), f"Weight must be on CUDA or XPU, but is on {self.weight.device}"
         if self.config.transform_init == "hadamard":
             transform_init_fn = get_hadamard_matrix
         elif self.config.transform_init == "identity":
