@@ -28,12 +28,15 @@ def fused_quantize_mx_op(
     forward_method: str,
     return_mask: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    return fusedQuantizeMx(
-        x_flat.to(torch.bfloat16),
-        hadamard_matrix.to(torch.bfloat16),
+    tensors = fusedQuantizeMx(
+        x_flat,
+        hadamard_matrix,
         method=forward_method,
         return_mask=return_mask,
     )
+    if not return_mask:
+        tensors = tensors + (None,)
+    return tensors
 
 
 @fused_quantize_mx_op.register_fake
@@ -103,8 +106,8 @@ def fused_quantize_nv_op(
     global_scale: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     return fusedQuantizeNv(
-        x_flat.to(torch.bfloat16),
-        hadamard_matrix.to(torch.bfloat16),
+        x_flat,
+        hadamard_matrix,
         global_scale.float(),
     )
 
@@ -161,14 +164,18 @@ def forward_quantize(
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if dtype == FPQuantDtype.MXFP4:
         qweight, scales, mask = fused_quantize_mx_op(
-            x,
-            hadamard_matrix,
+            x.to(torch.bfloat16),
+            hadamard_matrix.to(torch.bfloat16),
             forward_method,
             forward_method == "quest" and x.requires_grad,
         )
         return qweight, scales, mask
     elif dtype == FPQuantDtype.NVFP4:
-        qweight, scales = fused_quantize_nv_op(x, hadamard_matrix, global_scale)
+        qweight, scales = fused_quantize_nv_op(
+            x.to(torch.bfloat16),
+            hadamard_matrix.to(torch.bfloat16),
+            global_scale,
+        )
         return qweight, scales, None  # TODO: add mask
     else:
         raise ValueError(f"Unsupported forward dtype: {dtype}")
