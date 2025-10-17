@@ -24,7 +24,7 @@ def get_hadamard_matrix(group_size: int, dtype: torch.dtype, device: torch.devic
         dtype=dtype,
         device=device,
         requires_grad=False,
-    )
+    ) * (torch.randint(0, 1, (group_size, 1), device=device, dtype=dtype) * 2 - 1)
 
 
 def get_identity_matrix(group_size: int, dtype: torch.dtype, device: torch.device):
@@ -182,34 +182,34 @@ class FPQuantLinear(nn.Module):
             ),
         )
 
-        if self.config.forward_dtype == FPQuantDtype.MXFP4:
-            # MXFP4 quantization implicitly multiplies by 3.0
-            self.weight_global_scale = nn.Buffer(
-                torch.tensor([3.0], dtype=self.weight.dtype, device=self.weight.device),
-                requires_grad=False,
-            )
-            self.act_global_scale = nn.Buffer(
-                torch.tensor([3.0], dtype=self.weight.dtype, device=self.weight.device),
-                requires_grad=False,
-            )
+        if (
+            self.config.forward_dtype == FPQuantDtype.MXFP4
+            and self.config.forward_method == "quest"
+        ):
+            global_scale_val = 1.0
+        elif self.config.forward_method == "abs_max":
+            # MXFP4 abs_max quantization implicitly multiplies by 3.0
+            global_scale_val = 3.0
         elif self.config.forward_dtype == FPQuantDtype.NVFP4:
-            # MXFP4 quantization implicitly multiplies by 6.0
-            self.weight_global_scale = nn.Buffer(
-                torch.tensor(
-                    [10.0],
-                    dtype=self.weight.dtype,
-                    device=self.weight.device,
-                    requires_grad=False,
-                ),
-            )
-            self.act_global_scale = nn.Buffer(
-                torch.tensor(
-                    [10.0],
-                    dtype=self.weight.dtype,
-                    device=self.weight.device,
-                    requires_grad=False,
-                ),
-            )
+            # 10.0 ensures no underflows/overflows in most models
+            global_scale_val = 10.0
+
+        self.weight_global_scale = nn.Buffer(
+            torch.tensor(
+                [global_scale_val],
+                dtype=self.weight.dtype,
+                device=self.weight.device,
+                requires_grad=False,
+            ),
+        )
+        self.act_global_scale = nn.Buffer(
+            torch.tensor(
+                [global_scale_val],
+                dtype=self.weight.dtype,
+                device=self.weight.device,
+                requires_grad=False,
+            ),
+        )
 
         if self.config.store_master_weights:
             self.qweight = None
