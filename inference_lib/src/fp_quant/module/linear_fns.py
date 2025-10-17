@@ -26,16 +26,18 @@ def fused_quantize_mx_op(
     x_flat: torch.Tensor,
     hadamard_matrix: torch.Tensor,
     forward_method: str,
+    return_mask: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     return fusedQuantizeMx(
         x_flat.to(torch.bfloat16),
         hadamard_matrix.to(torch.bfloat16),
         method=forward_method,
+        return_mask=return_mask,
     )
 
 
 @fused_quantize_mx_op.register_fake
-def _(x_flat, hadamard_matrix, forward_method):
+def _(x_flat, hadamard_matrix, forward_method, return_mask):
     rows, cols = x_flat.size(0), x_flat.size(1) // 32
     padded_rows = ((rows + 128 - 1) // 128) * 128
     padded_cols = ((cols + 4 - 1) // 4) * 4
@@ -46,8 +48,12 @@ def _(x_flat, hadamard_matrix, forward_method):
     xh_e8m0 = torch.empty(
         padded_rows, padded_cols, dtype=torch.float8_e8m0fnu, device=x_flat.device
     )
+    if return_mask:
+        mask = torch.empty(rows, cols * 4, dtype=torch.uint8, device=x_flat.device)
+    else:
+        mask = None
 
-    return xh_e2m1, xh_e8m0
+    return xh_e2m1, xh_e8m0, mask
 
 
 @torch.library.custom_op("fp_quant::matmul_mxf4_bf16_tn_op", mutates_args=())
@@ -59,7 +65,11 @@ def matmul_mxf4_bf16_tn_op(
     alpha: torch.Tensor,
 ) -> torch.Tensor:
     return matmul_mxf4_bf16_tn(
-        x, w, to_blocked(xs), to_blocked(ws).view(torch.float8_e8m0fnu), alpha.float()
+        x,
+        w,
+        to_blocked(xs, use_triton_kernel=True),
+        to_blocked(ws, use_triton_kernel=True).view(torch.float8_e8m0fnu),
+        alpha.float(),
     )
 
 
@@ -129,7 +139,11 @@ def matmul_nvf4_bf16_tn_op(
     alpha: torch.Tensor,
 ) -> torch.Tensor:
     return matmul_nvf4_bf16_tn(
-        x, w, to_blocked(xs), to_blocked(ws.view(torch.float8_e4m3fn)), alpha.float()
+        x,
+        w,
+        to_blocked(xs, use_triton_kernel=True),
+        to_blocked(ws.view(torch.float8_e4m3fn), use_triton_kernel=True),
+        alpha.float(),
     )
 
 
@@ -146,12 +160,13 @@ def forward_quantize(
     forward_method: str,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if dtype == FPQuantDtype.MXFP4:
-        qweight, scales = fused_quantize_mx_op(
+        qweight, scales, mask = fused_quantize_mx_op(
             x,
             hadamard_matrix,
             forward_method,
+            forward_method == "quest" and x.requires_grad,
         )
-        return qweight, scales, None  # TODO: add mask
+        return qweight, scales, mask
     elif dtype == FPQuantDtype.NVFP4:
         qweight, scales = fused_quantize_nv_op(x, hadamard_matrix, global_scale)
         return qweight, scales, None  # TODO: add mask
@@ -171,38 +186,35 @@ def forward_gemm(x_q, w_q, x_scales, w_scales, alpha, dtype: FPQuantDtype):
         raise ValueError(f"Unsupported dtype: {dtype}")
 
 
-GRID_FP4 = torch.tensor(
-    [
-        0.0,
-        0.5,
-        1.0,
-        1.5,
-        2.0,
-        3.0,
-        4.0,
-        6.0,
-        -0.0,
-        -0.5,
-        -1.0,
-        -1.5,
-        -2.0,
-        -3.0,
-        -4.0,
-        -6.0,
-    ],
-    dtype=torch.bfloat16,
-)
-
-
 def _dq_fp4(x_e2m1: torch.Tensor, scales: torch.Tensor, alpha, dtype: FPQuantDtype):
-    global GRID_FP4
     device = x_e2m1.device
+    grid = torch.tensor(
+        [
+            0.0,
+            0.5,
+            1.0,
+            1.5,
+            2.0,
+            3.0,
+            4.0,
+            6.0,
+            -0.0,
+            -0.5,
+            -1.0,
+            -1.5,
+            -2.0,
+            -3.0,
+            -4.0,
+            -6.0,
+        ],
+        dtype=torch.bfloat16,
+        device=device,
+    )
+
     result_shape = x_e2m1.shape[:-1] + (x_e2m1.shape[-1] * 2,)
 
-    GRID_FP4 = GRID_FP4.to(device)
-
     xq_unpacked = torch.stack([x_e2m1 & 0xF, x_e2m1 >> 4], dim=-1).to(torch.int32)
-    x_fp4_dq = GRID_FP4[xq_unpacked]
+    x_fp4_dq = grid[xq_unpacked]
     if dtype == FPQuantDtype.MXFP4:
         scales_dq = scales.view(torch.float8_e8m0fnu).to(torch.bfloat16)
         gs = 32
