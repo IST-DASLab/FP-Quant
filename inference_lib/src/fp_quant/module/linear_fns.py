@@ -27,7 +27,11 @@ def fused_quantize_mx_op(
     hadamard_matrix: torch.Tensor,
     forward_method: str,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    return fusedQuantizeMx(x_flat, hadamard_matrix, method=forward_method)
+    return fusedQuantizeMx(
+        x_flat.to(torch.bfloat16),
+        hadamard_matrix.to(torch.bfloat16),
+        method=forward_method,
+    )
 
 
 @fused_quantize_mx_op.register_fake
@@ -88,7 +92,11 @@ def fused_quantize_nv_op(
     hadamard_matrix: torch.Tensor,
     global_scale: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    return fusedQuantizeNv(x_flat, hadamard_matrix, global_scale.float())
+    return fusedQuantizeNv(
+        x_flat.to(torch.bfloat16),
+        hadamard_matrix.to(torch.bfloat16),
+        global_scale.float(),
+    )
 
 
 @fused_quantize_nv_op.register_fake
@@ -182,26 +190,31 @@ GRID_FP4 = torch.tensor(
         -4.0,
         -6.0,
     ],
-    dtype=torch.bfloat16,
+    dtype=torch.float32,
 )
 
 
-def _dq_fp4(x_e2m1: torch.Tensor, x_e8m0: torch.Tensor, alpha):
+def _dq_fp4(x_e2m1: torch.Tensor, scales: torch.Tensor, alpha, dtype: FPQuantDtype):
     global GRID_FP4
     device = x_e2m1.device
     result_shape = x_e2m1.shape[:-1] + (x_e2m1.shape[-1] * 2,)
 
     GRID_FP4 = GRID_FP4.to(device)
 
-    xq_unpacked = torch.stack([xq & 0xF, xq >> 4], dim=-1).to(torch.int32)
-    x_dequantized = GRID_FP4[xq_unpacked]
+    xq_unpacked = torch.stack([x_e2m1 & 0xF, x_e2m1 >> 4], dim=-1).to(torch.int32)
+    x_fp4_dq = GRID_FP4[xq_unpacked]
+    if dtype == FPQuantDtype.MXFP4:
+        scales_dq = scales.view(torch.float8_e8m0fnu).to(torch.float32)
+        gs = 32
+    elif dtype == FPQuantDtype.NVFP4:
+        scales_dq = scales.view(torch.float8_e4m3fn).to(torch.float32)
+        gs = 16
+    else:
+        raise ValueError(f"Unsupported FPQuant dtype {dtype}")
 
-    x_fp4_dq = GRID_FP4[x_e2m1_unpacked]
-    scales_dq = x_e8m0.view(torch.float8_e8m0fnu).to(torch.bfloat16)
-
-    x_dq = (x_fp4_dq.view(-1, 32) * scales_dq[..., None]).view(
+    x_dq = (x_fp4_dq.view(-1, gs) * scales_dq.view(-1, 1)).view(
         *result_shape
-    ) / alpha.to(torch.bfloat16)
+    ) / alpha.to(torch.float32)
     return x_dq
 
 
@@ -287,24 +300,34 @@ class FPQuant4x16MasterFn(Function):
             forward_hadamard_matrix,
         ) = ctx.saved_tensors
 
-        x_flat_dequantized = _dq_fp4(x_flat_q, x_flat_scales, act_global_scale)
-        weight_dequantized = _dq_fp4(weight_q, weight_scales, weight_global_scale)
+        x_flat_dequantized = _dq_fp4(
+            x_flat_q, x_flat_scales, act_global_scale, ctx.dtype
+        )
+        weight_dequantized = _dq_fp4(
+            weight_q, weight_scales, weight_global_scale, ctx.dtype
+        )
         grad_output_flat = grad_output.flatten(end_dim=-2)
 
-        grad_input = torch.einsum("...j,ji->...i", grad_output_flat, weight_dequantized)
-        x_flat_mask = _unpack_mask(x_flat_mask)
+        grad_input = torch.einsum(
+            "...j,ji->...i", grad_output_flat, weight_dequantized.to(torch.bfloat16)
+        )
+        if x_flat_mask is not None:
+            grad_input *= (
+                _unpack_mask(x_flat_mask).view_as(grad_input).to(grad_input.dtype)
+            )
         grad_input = (
-            (grad_input.view(-1, 32) * x_flat_mask.view(-1, 32).to(grad_input.dtype))
-            @ forward_hadamard_matrix.T
+            grad_input.view(-1, 32) @ forward_hadamard_matrix.T.to(torch.bfloat16)
         ).view(ctx.x_shape)
 
         grad_weight = torch.einsum(
-            "...j,...i->ji", grad_output_flat, x_flat_dequantized
+            "...j,...i->ji", grad_output_flat, x_flat_dequantized.to(torch.bfloat16)
         )
-        weight_mask = _unpack_mask(weight_mask)
+        if weight_mask is not None:
+            grad_weight *= (
+                _unpack_mask(weight_mask).view_as(grad_weight).to(grad_weight.dtype)
+            )
         grad_weight = (
-            (grad_weight.view(-1, 32) * weight_mask.view(-1, 32).to(grad_weight.dtype))
-            @ forward_hadamard_matrix.T
+            grad_weight.view(-1, 32) @ forward_hadamard_matrix.T.to(torch.bfloat16)
         ).view(grad_output.size(-1), weight_q.size(-1) * 2)
 
         grad_bias = (

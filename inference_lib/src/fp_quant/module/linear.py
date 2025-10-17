@@ -20,12 +20,15 @@ from .pseudoquant_linear_fns import (
 
 def get_hadamard_matrix(group_size: int, dtype: torch.dtype, device: torch.device):
     return torch.tensor(
-        hadamard(group_size) * group_size**-0.5, dtype=dtype, device=device
+        hadamard(group_size) * group_size**-0.5,
+        dtype=dtype,
+        device=device,
+        requires_grad=False,
     )
 
 
 def get_identity_matrix(group_size: int, dtype: torch.dtype, device: torch.device):
-    return torch.eye(group_size, dtype=dtype, device=device)
+    return torch.eye(group_size, dtype=dtype, device=device, requires_grad=False)
 
 
 def get_gsr_matrix(group_size: int, dtype: torch.dtype, device: torch.device):
@@ -166,46 +169,48 @@ class FPQuantLinear(nn.Module):
         else:
             raise ValueError(f"Invalid transform init: {self.config.transform_init}")
 
-        self.forward_hadamard_matrix = nn.Parameter(
+        self.forward_hadamard_matrix = nn.Buffer(
             transform_init_fn(
                 self.config.hadamard_group_size,
                 self.weight.dtype,
                 self.weight.device,
             ),
-            requires_grad=False,
         )
-        self.backward_hadamard_matrix = nn.Parameter(
+        self.backward_hadamard_matrix = nn.Buffer(
             transform_init_fn(
                 self.config.hadamard_group_size,
                 self.weight.dtype,
                 self.weight.device,
             ),
-            requires_grad=False,
         )
 
         if self.config.forward_dtype == FPQuantDtype.MXFP4:
             # MXFP4 quantization implicitly multiplies by 3.0
-            self.weight_global_scale = nn.Parameter(
+            self.weight_global_scale = nn.Buffer(
                 torch.tensor([3.0], dtype=self.weight.dtype, device=self.weight.device),
                 requires_grad=False,
             )
-            self.act_global_scale = nn.Parameter(
+            self.act_global_scale = nn.Buffer(
                 torch.tensor([3.0], dtype=self.weight.dtype, device=self.weight.device),
                 requires_grad=False,
             )
         elif self.config.forward_dtype == FPQuantDtype.NVFP4:
             # MXFP4 quantization implicitly multiplies by 6.0
-            self.weight_global_scale = nn.Parameter(
+            self.weight_global_scale = nn.Buffer(
                 torch.tensor(
-                    [10.0], dtype=self.weight.dtype, device=self.weight.device
+                    [10.0],
+                    dtype=self.weight.dtype,
+                    device=self.weight.device,
+                    requires_grad=False,
                 ),
-                requires_grad=False,
             )
-            self.act_global_scale = nn.Parameter(
+            self.act_global_scale = nn.Buffer(
                 torch.tensor(
-                    [10.0], dtype=self.weight.dtype, device=self.weight.device
+                    [10.0],
+                    dtype=self.weight.dtype,
+                    device=self.weight.device,
+                    requires_grad=False,
                 ),
-                requires_grad=False,
             )
 
         if self.config.store_master_weights:
