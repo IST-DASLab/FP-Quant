@@ -190,7 +190,7 @@ GRID_FP4 = torch.tensor(
         -4.0,
         -6.0,
     ],
-    dtype=torch.float32,
+    dtype=torch.bfloat16,
 )
 
 
@@ -204,17 +204,17 @@ def _dq_fp4(x_e2m1: torch.Tensor, scales: torch.Tensor, alpha, dtype: FPQuantDty
     xq_unpacked = torch.stack([x_e2m1 & 0xF, x_e2m1 >> 4], dim=-1).to(torch.int32)
     x_fp4_dq = GRID_FP4[xq_unpacked]
     if dtype == FPQuantDtype.MXFP4:
-        scales_dq = scales.view(torch.float8_e8m0fnu).to(torch.float32)
+        scales_dq = scales.view(torch.float8_e8m0fnu).to(torch.bfloat16)
         gs = 32
     elif dtype == FPQuantDtype.NVFP4:
-        scales_dq = scales.view(torch.float8_e4m3fn).to(torch.float32)
+        scales_dq = scales.view(torch.float8_e4m3fn).to(torch.bfloat16)
         gs = 16
     else:
         raise ValueError(f"Unsupported FPQuant dtype {dtype}")
 
     x_dq = (x_fp4_dq.view(-1, gs) * scales_dq.view(-1, 1)).view(
         *result_shape
-    ) / alpha.to(torch.float32)
+    ) / alpha.to(torch.bfloat16)
     return x_dq
 
 
@@ -286,7 +286,7 @@ class FPQuant4x16MasterFn(Function):
         return y
 
     @staticmethod
-    @torch.compile()
+    @torch.compile(mode="max-autotune", fullgraph=True)
     def backward(ctx, grad_output: torch.Tensor):
         (
             x_flat_q,
@@ -308,9 +308,7 @@ class FPQuant4x16MasterFn(Function):
         )
         grad_output_flat = grad_output.flatten(end_dim=-2)
 
-        grad_input = torch.einsum(
-            "...j,ji->...i", grad_output_flat, weight_dequantized.to(torch.bfloat16)
-        )
+        grad_input = torch.einsum("...j,ji->...i", grad_output_flat, weight_dequantized)
         if x_flat_mask is not None:
             grad_input *= (
                 _unpack_mask(x_flat_mask).view_as(grad_input).to(grad_input.dtype)
@@ -320,7 +318,7 @@ class FPQuant4x16MasterFn(Function):
         ).view(ctx.x_shape)
 
         grad_weight = torch.einsum(
-            "...j,...i->ji", grad_output_flat, x_flat_dequantized.to(torch.bfloat16)
+            "...j,...i->ji", grad_output_flat, x_flat_dequantized
         )
         if weight_mask is not None:
             grad_weight *= (
