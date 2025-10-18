@@ -72,7 +72,7 @@ def matmul_mxf4_bf16_tn_op(
         w,
         to_blocked(xs, use_triton_kernel=True),
         to_blocked(ws, use_triton_kernel=True).view(torch.float8_e8m0fnu),
-        alpha.float(),
+        alpha,
     )
 
 
@@ -89,9 +89,7 @@ def matmul_ada_mxf4_bf16_tn_op(
     ws: torch.Tensor,
     alpha: torch.Tensor,
 ) -> torch.Tensor:
-    return matmul_ada_mxf4_bf16_tn(
-        x, w, xs, ws.view(torch.float8_e8m0fnu), alpha.float()
-    )
+    return matmul_ada_mxf4_bf16_tn(x, w, xs, ws.view(torch.float8_e8m0fnu), alpha)
 
 
 @matmul_ada_mxf4_bf16_tn_op.register_fake
@@ -108,7 +106,7 @@ def fused_quantize_nv_op(
     return fusedQuantizeNv(
         x_flat,
         hadamard_matrix,
-        global_scale.float(),
+        global_scale,
     )
 
 
@@ -146,7 +144,7 @@ def matmul_nvf4_bf16_tn_op(
         w,
         to_blocked(xs, use_triton_kernel=True),
         to_blocked(ws.view(torch.float8_e4m3fn), use_triton_kernel=True),
-        alpha.float(),
+        alpha,
     )
 
 
@@ -174,7 +172,7 @@ def forward_quantize(
         qweight, scales = fused_quantize_nv_op(
             x.to(torch.bfloat16),
             hadamard_matrix.to(torch.bfloat16),
-            global_scale,
+            global_scale.float(),
         )
         return qweight, scales, None  # TODO: add mask
     else:
@@ -184,11 +182,13 @@ def forward_quantize(
 def forward_gemm(x_q, w_q, x_scales, w_scales, alpha, dtype: FPQuantDtype):
     if dtype == FPQuantDtype.MXFP4:
         if False and x_q.shape[0] <= 64:  # TODO: remove when ada alpha is fixed
-            return matmul_ada_mxf4_bf16_tn_op(x_q, w_q, x_scales, w_scales, alpha)
+            return matmul_ada_mxf4_bf16_tn_op(
+                x_q, w_q, x_scales, w_scales, alpha.float()
+            )
         else:
-            return matmul_mxf4_bf16_tn_op(x_q, w_q, x_scales, w_scales, alpha)
+            return matmul_mxf4_bf16_tn_op(x_q, w_q, x_scales, w_scales, alpha.float())
     elif dtype == FPQuantDtype.NVFP4:
-        return matmul_nvf4_bf16_tn_op(x_q, w_q, x_scales, w_scales, alpha)
+        return matmul_nvf4_bf16_tn_op(x_q, w_q, x_scales, w_scales, alpha.float())
     else:
         raise ValueError(f"Unsupported dtype: {dtype}")
 
@@ -218,22 +218,29 @@ def _dq_fp4(x_e2m1: torch.Tensor, scales: torch.Tensor, alpha, dtype: FPQuantDty
         device=device,
     )
 
-    result_shape = x_e2m1.shape[:-1] + (x_e2m1.shape[-1] * 2,)
+    k = x_e2m1.shape[-1] * 2
+    result_shape = x_e2m1.shape[:-1] + (k,)
 
-    xq_unpacked = torch.stack([x_e2m1 & 0xF, x_e2m1 >> 4], dim=-1).to(torch.int32)
-    x_fp4_dq = grid[xq_unpacked]
     if dtype == FPQuantDtype.MXFP4:
-        scales_dq = scales.view(torch.float8_e8m0fnu).to(torch.bfloat16)
         gs = 32
+        scales = scales.view(torch.float8_e8m0fnu).to(torch.bfloat16)
     elif dtype == FPQuantDtype.NVFP4:
-        scales_dq = scales.view(torch.float8_e4m3fn).to(torch.bfloat16)
         gs = 16
+        scales = scales.view(torch.float8_e4m3fn).to(torch.bfloat16)
     else:
         raise ValueError(f"Unsupported FPQuant dtype {dtype}")
 
-    x_dq = (x_fp4_dq.view(-1, gs) * scales_dq.view(-1, 1)).view(
-        *result_shape
-    ) / alpha.to(torch.bfloat16)
+    x_e2m1 = x_e2m1.view(-1, k // 2)
+    scales = scales.view(-1, k // gs)[
+        : x_e2m1.shape[0], :
+    ]  # scales were padded to 128 along the 0 dim in QuantizeMX/NV
+
+    xq_unpacked = torch.stack([x_e2m1 & 0xF, x_e2m1 >> 4], dim=-1).to(torch.int32)
+    x_fp4_dq = grid[xq_unpacked]
+
+    x_dq = (x_fp4_dq.view(-1, gs) * scales.view(-1, 1)).view(*result_shape) / alpha.to(
+        torch.bfloat16
+    )
     return x_dq
 
 
