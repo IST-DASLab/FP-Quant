@@ -8,6 +8,7 @@ from ..utils import FPQuantConfig, FPQuantDtype, validate_config
 from .linear_fns import (
     HAS_QUTLASS,
     FPQuant4x16MasterFn,
+    FPQuant4x8MasterFn,
     FPQuant4x16NoMasterFn,
     forward_quantize,
 )
@@ -24,7 +25,7 @@ def get_hadamard_matrix(group_size: int, dtype: torch.dtype, device: torch.devic
         dtype=dtype,
         device=device,
         requires_grad=False,
-    ) * (torch.randint(0, 1, (group_size, 1), device=device, dtype=dtype) * 2 - 1)
+    ) * (torch.randint(0, 2, (group_size, 1), device=device, dtype=dtype) * 2 - 1)
 
 
 def get_identity_matrix(group_size: int, dtype: torch.dtype, device: torch.device):
@@ -250,6 +251,22 @@ class FPQuantLinear(nn.Module):
             and self.config.pseudoquantization == False
         ):
             return FPQuant4x16MasterFn.apply(
+                x,
+                self.weight,
+                self.weight_global_scale,
+                self.act_global_scale,
+                self.bias,
+                self.forward_hadamard_matrix,
+                self.config.forward_dtype,
+                self.config.forward_method,
+            )
+        elif (
+            self.config.forward_dtype == FPQuantDtype.MXFP4
+            and self.config.backward_dtype == FPQuantDtype.MXFP8
+            and self.config.store_master_weights == True
+            and self.config.pseudoquantization == False
+        ):
+            return FPQuant4x8MasterFn.apply(
                 x,
                 self.weight,
                 self.weight_global_scale,

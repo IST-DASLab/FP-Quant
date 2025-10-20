@@ -361,6 +361,129 @@ class FPQuant4x16MasterFn(Function):
         return grad_input, grad_weight, None, None, grad_bias, None, None, None
 
 
+@torch.compile(fullgraph=True)
+def _pseudoquant_mxfp8(x: torch.Tensor) -> torch.Tensor:
+    orig_shape = x.shape
+    x = x.reshape(-1, 32)
+
+    absmax = x.abs().max(dim=-1, keepdim=True).values
+    shared_exps = torch.where(
+        absmax > 0,
+        2 ** (torch.log2(x.abs().max(dim=-1, keepdim=True).values).floor() - 8),
+        1.0,
+    )
+    x = (
+        torch.clamp(x / shared_exps, -448.0, 448.0).to(torch.float8_e4m3fn).to(x.dtype)
+        * shared_exps
+    )
+    return x.reshape(orig_shape)
+
+
+class FPQuant4x8MasterFn(Function):
+    @staticmethod
+    def forward(
+        ctx,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        weight_global_scale: torch.Tensor,
+        act_global_scale: torch.Tensor,
+        bias: Optional[torch.Tensor],
+        forward_hadamard_matrix: torch.Tensor,
+        dtype: FPQuantDtype,
+        forward_method: str,
+    ):
+        x_flat = x.contiguous().flatten(end_dim=-2)
+
+        # Quantize input
+        x_flat_q, x_flat_scales, x_flat_mask = forward_quantize(
+            x_flat, forward_hadamard_matrix, act_global_scale, dtype, forward_method
+        )
+
+        # Quantize weights
+        weight_q, weight_scales, weight_mask = forward_quantize(
+            weight, forward_hadamard_matrix, weight_global_scale, dtype, forward_method
+        )
+
+        y = forward_gemm(
+            x_flat_q,
+            weight_q,
+            x_flat_scales,
+            weight_scales,
+            1.0 / (weight_global_scale * act_global_scale),
+            dtype,
+        )
+
+        y = y.unflatten(dim=0, sizes=x.shape[:-1])
+        if bias is not None:
+            y += bias
+
+        ctx.x_shape = x.shape
+        ctx.dtype = dtype
+        ctx.bias_present = bias is not None
+        ctx.save_for_backward(
+            x_flat_q,
+            weight_q,
+            x_flat_scales,
+            weight_scales,
+            act_global_scale,
+            weight_global_scale,
+            x_flat_mask,
+            weight_mask,
+            forward_hadamard_matrix,
+        )
+
+        return y
+
+    @staticmethod
+    @torch.compile(mode="max-autotune", fullgraph=True)
+    def backward(ctx, grad_output: torch.Tensor):
+        (
+            x_flat_q,
+            weight_q,
+            x_flat_scales,
+            weight_scales,
+            act_global_scale,
+            weight_global_scale,
+            x_flat_mask,
+            weight_mask,
+            forward_hadamard_matrix,
+        ) = ctx.saved_tensors
+
+        x_flat_dequantized = _dq_fp4(
+            x_flat_q, x_flat_scales, act_global_scale, ctx.dtype
+        )
+        weight_dequantized = _dq_fp4(
+            weight_q, weight_scales, weight_global_scale, ctx.dtype
+        )
+        grad_output_flat = _pseudoquant_mxfp8(grad_output).flatten(end_dim=-2)
+
+        grad_input = torch.einsum("...j,ji->...i", grad_output_flat, weight_dequantized)
+        if x_flat_mask is not None:
+            grad_input *= (
+                _unpack_mask(x_flat_mask).view_as(grad_input).to(grad_input.dtype)
+            )
+        grad_input = (
+            grad_input.view(-1, 32) @ forward_hadamard_matrix.T.to(torch.bfloat16)
+        ).view(ctx.x_shape)
+
+        grad_weight = torch.einsum(
+            "...j,...i->ji", grad_output_flat, x_flat_dequantized
+        )
+        if weight_mask is not None:
+            grad_weight *= (
+                _unpack_mask(weight_mask).view_as(grad_weight).to(grad_weight.dtype)
+            )
+        grad_weight = (
+            grad_weight.view(-1, 32) @ forward_hadamard_matrix.T.to(torch.bfloat16)
+        ).view(grad_output.size(-1), weight_q.size(-1) * 2)
+
+        grad_bias = (
+            grad_output.flatten(end_dim=-2).sum(dim=0) if ctx.bias_present else None
+        )
+
+        return grad_input, grad_weight, None, None, grad_bias, None, None, None
+
+
 class FPQuant4x16NoMasterFn(Function):
     @staticmethod
     def forward(
