@@ -6,6 +6,7 @@ from typing import List, Literal
 class FPQuantDtype(Enum):
     MXFP4 = "mxfp4"
     NVFP4 = "nvfp4"
+    MXFP8 = "mxfp8"
     BF16 = "bf16"
 
 
@@ -44,4 +45,12 @@ def validate_config(config: FPQuantConfig):
     ):
         raise ValueError(
             "MXFP4 can only be used with hadamard_group_size in [32, 64, 128]"
+        )
+    if (
+        config.forward_dtype == FPQuantDtype.MXFP8
+        or config.backward_dtype == FPQuantDtype.MXFP8
+        and config.forward_dtype != FPQuantDtype.MXFP4
+    ):
+        raise ValueError(
+            "MXFP8 can only be used on backward in combination with MXFP4 forward"
         )
