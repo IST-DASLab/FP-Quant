@@ -369,14 +369,16 @@ def _pseudoquant_mxfp8(x: torch.Tensor) -> torch.Tensor:
     absmax = x.abs().max(dim=-1, keepdim=True).values
     shared_exps = torch.where(
         absmax > 0,
-        2 ** (torch.log2(x.abs().max(dim=-1, keepdim=True).values).floor() - 8),
-        1.0,
-    )
-    x = (
-        torch.clamp(x / shared_exps, -448.0, 448.0).to(torch.float8_e4m3fn).to(x.dtype)
-        * shared_exps
-    )
-    return x.reshape(orig_shape)
+        torch.log2(x.abs().max(dim=-1, keepdim=True).values).floor().to(torch.uint8)
+        - 8
+        + 128,
+        128,
+    ).view(torch.float8_e8m0fnu)
+    xq = torch.clamp(x / shared_exps.to(x.dtype), -448.0, 448.0).to(torch.float8_e4m3fn)
+    xdq = xq.to(x.dtype) * shared_exps.to(x.dtype)
+    return xdq.reshape(
+        orig_shape
+    )  # , xq.reshape(orig_shape), shared_exps.reshape(orig_shape[:-1] + (orig_shape[-1] // 32,))
 
 
 class FPQuant4x8MasterFn(Function):
