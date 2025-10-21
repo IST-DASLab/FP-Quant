@@ -6,12 +6,13 @@ from scipy.linalg import hadamard
 
 from ..utils import FPQuantConfig, FPQuantDtype, validate_config
 from .linear_fns import (
-    HAS_QUTLASS,
     FPQuant4x16MasterFn,
+    FPQuant4x4MasterFn,
     FPQuant4x8MasterFn,
     FPQuant4x16NoMasterFn,
     forward_quantize,
 )
+from .qutlass_ops import HAS_QUTLASS
 from .pseudoquant_linear_fns import (
     PseudoQuant4x16MasterFn,
     PseudoQuant4x16NoMasterFn,
@@ -247,12 +248,12 @@ class FPQuantLinear(nn.Module):
 
     def forward(self, x) -> torch.Tensor:
         if (
-            self.config.forward_dtype in (FPQuantDtype.MXFP4, FPQuantDtype.NVFP4)
-            and self.config.backward_dtype == FPQuantDtype.BF16
+            self.config.forward_dtype == FPQuantDtype.MXFP4
+            and self.config.backward_dtype == FPQuantDtype.MXFP4
             and self.config.store_master_weights == True
             and self.config.pseudoquantization == False
         ):
-            return FPQuant4x16MasterFn.apply(
+            return FPQuant4x4MasterFn.apply(
                 x,
                 self.weight,
                 self.weight_global_scale,
@@ -269,6 +270,22 @@ class FPQuantLinear(nn.Module):
             and self.config.pseudoquantization == False
         ):
             return FPQuant4x8MasterFn.apply(
+                x,
+                self.weight,
+                self.weight_global_scale,
+                self.act_global_scale,
+                self.bias,
+                self.forward_hadamard_matrix,
+                self.config.forward_dtype,
+                self.config.forward_method,
+            )
+        elif (
+            self.config.forward_dtype in (FPQuantDtype.MXFP4, FPQuantDtype.NVFP4)
+            and self.config.backward_dtype == FPQuantDtype.BF16
+            and self.config.store_master_weights == True
+            and self.config.pseudoquantization == False
+        ):
+            return FPQuant4x16MasterFn.apply(
                 x,
                 self.weight,
                 self.weight_global_scale,
