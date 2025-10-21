@@ -7,20 +7,22 @@ try:
         # Forward quantization
         fusedQuantizeMx,
         fusedQuantizeNv,
-        
         # GEMMs
         matmul_ada_mxf4_bf16_tn,
         matmul_mxf4_bf16_tn,
         matmul_nvf4_bf16_tn,
         matmul_mxf8_bf16_tn,
-        
+        matmul_mxf8_bf16_tt,
+        matmul_mxf8_bf16_nt,
+        matmul_mxf8_bf16_nn,
         # Backward quantization
         backward_t_bf16,
         backward_qt_bf16,
     )
+
     # Layout
     from qutlass.utils import to_blocked as to_blocked_qutlass
-    
+
     # Triton requant
     from qutlass.triton import (
         bf16_square_double_mxfp8,
@@ -31,10 +33,14 @@ try:
 except ImportError:
     HAS_QUTLASS = False
 
+    bf16_square_double_mxfp8 = None
+    mxfp4_transpose_mxfp8 = None
+
 from ..utils import FPQuantDtype
 
 
 ### Forward quantization
+
 
 @torch.library.custom_op("fp_quant::fused_quantize_mx_op", mutates_args=())
 def fused_quantize_mx_op(
@@ -52,6 +58,7 @@ def fused_quantize_mx_op(
     if not return_mask:
         tensors = tensors + (None,)
     return tensors
+
 
 @fused_quantize_mx_op.register_fake
 def _(x_flat, hadamard_matrix, forward_method, return_mask):
@@ -84,6 +91,7 @@ def fused_quantize_nv_op(
         hadamard_matrix,
         global_scale,
     )
+
 
 @fused_quantize_nv_op.register_fake
 def _(x_flat, hadamard_matrix, global_scale):
@@ -125,6 +133,7 @@ def matmul_mxf4_bf16_tn_op(
         alpha,
     )
 
+
 @matmul_mxf4_bf16_tn_op.register_fake
 def _(x, w, xs, ws, alpha):
     return x.new_empty(*x.shape[:-1], w.shape[0], dtype=torch.bfloat16)
@@ -139,6 +148,7 @@ def matmul_ada_mxf4_bf16_tn_op(
     alpha: torch.Tensor,
 ) -> torch.Tensor:
     return matmul_ada_mxf4_bf16_tn(x, w, xs, ws.view(torch.float8_e8m0fnu), alpha)
+
 
 @matmul_ada_mxf4_bf16_tn_op.register_fake
 def _(x, w, xs, ws, alpha):
@@ -161,6 +171,7 @@ def matmul_nvf4_bf16_tn_op(
         alpha,
     )
 
+
 @matmul_nvf4_bf16_tn_op.register_fake
 def _(x, w, xs, ws, alpha):
     return x.new_empty(*x.shape[:-1], w.shape[0], dtype=torch.bfloat16)
@@ -182,9 +193,76 @@ def matmul_mxf8_bf16_tn_op(
         alpha,
     )
 
+
 @matmul_mxf8_bf16_tn_op.register_fake
 def _(x, w, xs, ws, alpha):
-    return x.new_empty(*x.shape[:-1], w.shape[0], dtype=torch.bfloat16)
+    return x.new_empty(x.shape[0], w.shape[0], dtype=torch.bfloat16)
+
+
+@torch.library.custom_op("fp_quant::matmul_mxf8_bf16_nt_op", mutates_args=())
+def matmul_mxf8_bf16_nt_op(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    xs: torch.Tensor,
+    ws: torch.Tensor,
+    alpha: torch.Tensor,
+) -> torch.Tensor:
+    return matmul_mxf8_bf16_nt(
+        x,
+        w,
+        to_blocked_qutlass(xs, use_triton_kernel=True),
+        to_blocked_qutlass(ws, use_triton_kernel=True).view(torch.float8_e8m0fnu),
+        alpha,
+    )
+
+
+@matmul_mxf8_bf16_nt_op.register_fake
+def _(x, w, xs, ws, alpha):
+    return x.new_empty(x.shape[1], w.shape[1], dtype=torch.bfloat16)
+
+
+@torch.library.custom_op("fp_quant::matmul_mxf8_bf16_tt_op", mutates_args=())
+def matmul_mxf8_bf16_tt_op(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    xs: torch.Tensor,
+    ws: torch.Tensor,
+    alpha: torch.Tensor,
+) -> torch.Tensor:
+    return matmul_mxf8_bf16_tt(
+        x,
+        w,
+        to_blocked_qutlass(xs, use_triton_kernel=True),
+        to_blocked_qutlass(ws, use_triton_kernel=True).view(torch.float8_e8m0fnu),
+        alpha,
+    )
+
+
+@matmul_mxf8_bf16_tt_op.register_fake
+def _(x, w, xs, ws, alpha):
+    return x.new_empty(x.shape[0], w.shape[1], dtype=torch.bfloat16)
+
+
+@torch.library.custom_op("fp_quant::matmul_mxf8_bf16_nn_op", mutates_args=())
+def matmul_mxf8_bf16_nn_op(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    xs: torch.Tensor,
+    ws: torch.Tensor,
+    alpha: torch.Tensor,
+) -> torch.Tensor:
+    return matmul_mxf8_bf16_nn(
+        x,
+        w,
+        to_blocked_qutlass(xs, use_triton_kernel=True),
+        to_blocked_qutlass(ws, use_triton_kernel=True).view(torch.float8_e8m0fnu),
+        alpha,
+    )
+
+
+@matmul_mxf8_bf16_nn_op.register_fake
+def _(x, w, xs, ws, alpha):
+    return x.new_empty(x.shape[1], w.shape[0], dtype=torch.bfloat16)
 
 
 ### Backward Quantization
@@ -200,10 +278,23 @@ def backward_t_bf16_op(
         hadamard_matrix,
     )
 
+
 @backward_t_bf16_op.register_fake
 def _(x, hadamard_matrix):
-    xh_e2m1 = torch.empty(*x.shape[:-2], x.size(-1), x.size(-2) // 2, dtype=torch.float4_e2m1fn_x2, device=x.device)
-    xh_e8m0 = torch.empty(*x.shape[:-2], x.size(-1), x.size(-2) // 32, dtype=torch.float8_e8m0fnu, device=x.device)
+    xh_e2m1 = torch.empty(
+        *x.shape[:-2],
+        x.size(-1),
+        x.size(-2) // 2,
+        dtype=torch.float4_e2m1fn_x2,
+        device=x.device,
+    )
+    xh_e8m0 = torch.empty(
+        *x.shape[:-2],
+        x.size(-1),
+        x.size(-2) // 32,
+        dtype=torch.float8_e8m0fnu,
+        device=x.device,
+    )
     return xh_e2m1, xh_e8m0
 
 
@@ -214,17 +305,25 @@ def backward_qt_bf16_op(
     hadamard_matrix: torch.Tensor,
     alpha: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    return backward_qt_bf16(
-        x_e2m1,
-        x_e8m0,
-        hadamard_matrix,
-        alpha
-    )
+    return backward_qt_bf16(x_e2m1, x_e8m0, hadamard_matrix, alpha)
+
 
 @backward_qt_bf16_op.register_fake
 def _(x_e2m1, x_e8m0, hadamard_matrix, alpha):
-    xh_e2m1 = torch.empty(*x_e2m1.shape[:-2], x_e2m1.size(-1) * 2, x_e2m1.size(-2) // 2, dtype=torch.float4_e2m1fn_x2, device=x_e2m1.device)
-    xh_e8m0 = torch.empty(*x_e8m0.shape[:-2], x_e8m0.size(-1) * 32, x_e8m0.size(-2) // 32, dtype=torch.float8_e8m0fnu, device=x_e2m1.device)
+    xh_e2m1 = torch.empty(
+        *x_e2m1.shape[:-2],
+        x_e2m1.size(-1) * 2,
+        x_e2m1.size(-2) // 2,
+        dtype=torch.float4_e2m1fn_x2,
+        device=x_e2m1.device,
+    )
+    xh_e8m0 = torch.empty(
+        *x_e8m0.shape[:-2],
+        x_e8m0.size(-1) * 32,
+        x_e8m0.size(-2) // 32,
+        dtype=torch.float8_e8m0fnu,
+        device=x_e2m1.device,
+    )
     return xh_e2m1, xh_e8m0
 
 
