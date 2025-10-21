@@ -56,8 +56,6 @@ def validate_config(config: FPQuantConfig):
         )
     if (
         config.backward_dtype == FPQuantDtype.MXFP4
-        and config.forward_dtype !=  FPQuantDtype.MXFP4
+        and config.forward_dtype != FPQuantDtype.MXFP4
     ):
-        raise ValueError(
-            "MXFP4 backward can only be used with MXFP4 forward"
-        )
+        raise ValueError("MXFP4 backward can only be used with MXFP4 forward")

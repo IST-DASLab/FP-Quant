@@ -10,17 +10,21 @@ from .qutlass_ops import (
     # Forward quantization
     fused_quantize_mx_op,
     fused_quantize_nv_op,
-    
     # GEMMs
     matmul_ada_mxf4_bf16_tn_op,
     matmul_mxf4_bf16_tn_op,
     matmul_nvf4_bf16_tn_op,
     matmul_mxf8_bf16_tn_op,
-    
+    matmul_mxf8_bf16_nt_op,
+    matmul_mxf8_bf16_tt_op,
+    matmul_mxf8_bf16_nn_op,
     # Backward quantization
     backward_t_bf16_op,
     backward_qt_bf16_op,
+    bf16_square_double_mxfp8,
+    mxfp4_transpose_mxfp8,
 )
+
 
 def forward_quantize(
     x: torch.Tensor,
@@ -131,7 +135,7 @@ class FPQuant4x4MasterFn(Function):
         return y
 
     @staticmethod
-    @torch.compile(mode="max-autotune", fullgraph=True)
+    # @torch.compile(fullgraph=True)
     def backward(ctx, grad_output: torch.Tensor):
         (
             x_flat_q,
@@ -144,26 +148,29 @@ class FPQuant4x4MasterFn(Function):
             weight_mask,
             forward_hadamard_matrix,
         ) = ctx.saved_tensors
-        
+
         backward_hadamard_matrix = forward_hadamard_matrix.to(torch.bfloat16) * (
-            torch.randint(0, 2, (32,), device=forward_hadamard_matrix.device, dtype=torch.bfloat16)
-            * 2. - 1.
+            torch.randint(
+                0, 2, (32,), device=forward_hadamard_matrix.device, dtype=torch.bfloat16
+            )
+            * 2.0
+            - 1.0
         )
-        
+
         grad_output_hb_e2m1, grad_output_hb_e8m0, _ = fused_quantize_mx_op(
             grad_output.flatten(end_dim=-2),
             backward_hadamard_matrix,
             "abs_max",
             False,
         )
-        
+
         hft_weightt_hb_e2m1, hft_weightt_hb_e8m0 = backward_qt_bf16_op(
             weight_q,
             weight_scales,
             backward_hadamard_matrix,
             weight_global_scale,
         )
-        
+
         grad_input_hf = matmul_mxf4_bf16_tn_op(
             grad_output_hb_e2m1.view(torch.uint8),
             hft_weightt_hb_e2m1.view(torch.uint8),
@@ -179,8 +186,7 @@ class FPQuant4x4MasterFn(Function):
         grad_input = (
             grad_input_hf.view(-1, 32) @ forward_hadamard_matrix.T.to(torch.bfloat16)
         ).view(ctx.x_shape)
-        
-        
+
         grad_outputt_hb_e2m1, grad_outputt_hb_e8m0 = backward_t_bf16_op(
             grad_output.flatten(end_dim=-2),
             backward_hadamard_matrix,
@@ -201,7 +207,9 @@ class FPQuant4x4MasterFn(Function):
 
         if weight_mask is not None:
             grad_weight_hf *= (
-                _unpack_mask(weight_mask).view_as(grad_weight_hf).to(grad_weight_hf.dtype)
+                _unpack_mask(weight_mask)
+                .view_as(grad_weight_hf)
+                .to(grad_weight_hf.dtype)
             )
         grad_weight = (
             grad_weight_hf.view(-1, 32) @ forward_hadamard_matrix.T.to(torch.bfloat16)
@@ -285,19 +293,26 @@ class FPQuant4x8MasterFn(Function):
         ) = ctx.saved_tensors
 
         x_flat_t_fp8, x_flat_t_scales = mxfp4_transpose_mxfp8(
-            x_flat_q, x_flat_scales,
+            x_flat_q,
+            x_flat_scales,
         )
         weight_t_fp8, weight_t_scales = mxfp4_transpose_mxfp8(
-            weight_q, weight_scales,
+            weight_q,
+            weight_scales,
         )
 
         grad_output = grad_output.flatten(end_dim=-2)
-        grad_output_fp8, grad_output_scales = bf16_mxfp8(grad_output)
-        grad_output_t_fp8, grad_output_t_scales = bf16_transpose_mxfp8(grad_output)
+        grad_output_fp8, grad_output_hid_scales, grad_output_batch_scales = (
+            bf16_square_double_mxfp8(
+                grad_output,
+            )
+        )
 
         grad_input = matmul_mxf8_bf16_tn_op(
-            grad_output_fp8, weight_t_fp8,
-            grad_output_scales, weight_t_scales,
+            grad_output_fp8,
+            weight_t_fp8,
+            grad_output_hid_scales,
+            weight_t_scales,
             1 / weight_global_scale.float(),
         )
 
@@ -309,9 +324,11 @@ class FPQuant4x8MasterFn(Function):
             grad_input.view(-1, 32) @ forward_hadamard_matrix.T.to(torch.bfloat16)
         ).view(ctx.x_shape)
 
-        grad_weight = matmul_mxf8_bf16_tn_op(
-            grad_output_t_fp8, x_flat_t_fp8,
-            grad_output_t_scales, x_flat_t_scales,
+        grad_weight = matmul_mxf8_bf16_nn_op(
+            grad_output_fp8,
+            x_flat_t_fp8,
+            grad_output_batch_scales,
+            x_flat_t_scales,
             1 / act_global_scale.float(),
         )
 
@@ -393,7 +410,6 @@ class FPQuant4x16MasterFn(Function):
             grad_output,
             weight,
         ).view(ctx.x_shape)
-
 
         grad_weight = torch.einsum(
             "...i,...j->ij",
