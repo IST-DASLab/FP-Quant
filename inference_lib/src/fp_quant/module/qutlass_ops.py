@@ -18,23 +18,16 @@ try:
         # Backward quantization
         backward_t_bf16,
         backward_qt_bf16,
+        backward_bf16_square_double_mxfp8,
+        mxfp4_transpose_mxfp8,
     )
 
     # Layout
     from qutlass.utils import to_blocked as to_blocked_qutlass
 
-    # Triton requant
-    from qutlass.triton import (
-        bf16_square_double_mxfp8,
-        mxfp4_transpose_mxfp8,
-    )
-
     HAS_QUTLASS = True
 except ImportError:
     HAS_QUTLASS = False
-
-    bf16_square_double_mxfp8 = None
-    mxfp4_transpose_mxfp8 = None
 
 from ..utils import FPQuantDtype
 
@@ -325,6 +318,57 @@ def _(x_e2m1, x_e8m0, hadamard_matrix, alpha):
         device=x_e2m1.device,
     )
     return xh_e2m1, xh_e8m0
+
+
+@torch.library.custom_op("fp_quant::backward_bf16_square_double_mxfp8", mutates_args=())
+def backward_bf16_square_double_mxfp8_op(
+    x_bf16: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return backward_bf16_square_double_mxfp8(x_bf16)
+
+
+@backward_bf16_square_double_mxfp8_op.register_fake
+def _(x_bf16):
+    x_fp8 = torch.empty_like(x_bf16, dtype=torch.float8_e4m3fn)
+    row_scales = torch.empty(
+        x_bf16.shape[0],
+        x_bf16.shape[1] // 32,
+        device=x_bf16.device,
+        dtype=torch.float8_e8m0fnu,
+    )
+    column_scales = torch.empty(
+        x_bf16.shape[1],
+        x_bf16.shape[0] // 32,
+        device=x_bf16.device,
+        dtype=torch.float8_e8m0fnu,
+    )
+    return x_fp8, row_scales, column_scales
+
+
+@torch.library.custom_op("fp_quant::mxfp4_transpose_mxfp8", mutates_args=())
+def mxfp4_transpose_mxfp8_op(
+    x_fp4: torch.Tensor,
+    scales: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    return mxfp4_transpose_mxfp8(x_fp4, scales)
+
+
+@mxfp4_transpose_mxfp8_op.register_fake
+def _(x_fp4, scales):
+    x_fp8 = torch.empty(
+        x_fp4.shape[1] * 2,
+        x_fp4.shape[0],
+        device=x_fp4.device,
+        dtype=torch.float8_e4m3fn,
+    )
+    shared_exps = torch.empty(
+        x_fp4.shape[1] * 2,
+        x_fp4.shape[0] // 32,
+        device=x_fp4.device,
+        dtype=torch.float8_e8m0fnu,
+    )
+
+    return x_fp8, shared_exps
 
 
 def to_blocked(x: torch.Tensor) -> torch.Tensor:
