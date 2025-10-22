@@ -9,6 +9,7 @@ from .linear_fns import (
     FPQuant4x16MasterFn,
     FPQuant4x4MasterFn,
     FPQuant4x8MasterFn,
+    FPQuant4x8NoMasterFn,
     FPQuant4x16NoMasterFn,
     forward_quantize,
 )
@@ -272,6 +273,23 @@ class FPQuantLinear(nn.Module):
             return FPQuant4x8MasterFn.apply(
                 x,
                 self.weight,
+                self.weight_global_scale,
+                self.act_global_scale,
+                self.bias,
+                self.forward_hadamard_matrix,
+                self.config.forward_dtype,
+                self.config.forward_method,
+            )
+        elif (
+            self.config.forward_dtype == FPQuantDtype.MXFP4
+            and self.config.backward_dtype == FPQuantDtype.MXFP8
+            and self.config.store_master_weights == False
+            and self.config.pseudoquantization == False
+        ):
+            return FPQuant4x8NoMasterFn.apply(
+                x,
+                self.qweight,
+                self.scales,
                 self.weight_global_scale,
                 self.act_global_scale,
                 self.bias,
