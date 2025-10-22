@@ -349,6 +349,61 @@ class FPQuant4x8MasterFn(Function):
         return grad_input, grad_weight, None, None, grad_bias, None, None, None
 
 
+class FPQuant4x8NoMasterFn(Function):
+    @staticmethod
+    def forward(
+        ctx,
+        x: torch.Tensor,
+        weight_q: torch.Tensor,
+        weight_scales: torch.Tensor,
+        weight_global_scale: torch.Tensor,
+        act_global_scale: torch.Tensor,
+        bias: Optional[torch.Tensor],
+        forward_hadamard_matrix: torch.Tensor,
+        dtype: FPQuantDtype,
+        forward_method: str,
+    ):
+        x_flat = x.contiguous().flatten(end_dim=-2)
+
+        # Quantize input
+        x_flat_q, x_flat_scales, x_flat_mask = forward_quantize(
+            x_flat, forward_hadamard_matrix, act_global_scale, dtype, forward_method
+        )
+
+        y = forward_gemm(
+            x_flat_q,
+            weight_q,
+            x_flat_scales,
+            weight_scales,
+            1.0 / (weight_global_scale * act_global_scale),
+            dtype,
+        )
+
+        y = y.unflatten(dim=0, sizes=x.shape[:-1])
+        if bias is not None:
+            y += bias
+
+        ctx.x_shape = x.shape
+        ctx.dtype = dtype
+        ctx.bias_present = bias is not None
+        ctx.save_for_backward(
+            x_flat_q,
+            weight_q,
+            x_flat_scales,
+            weight_scales,
+            x_flat_mask,
+            forward_hadamard_matrix,
+        )
+
+        return y
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        raise NotImplementedError(
+            "Backward pass is not implemented for FPQuant4x16NoMasterFn yet"
+        )
+
+
 class FPQuant4x16MasterFn(Function):
     @staticmethod
     def forward(
