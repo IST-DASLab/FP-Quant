@@ -329,16 +329,19 @@ def backward_bf16_square_double_mxfp8_op(
 
 @backward_bf16_square_double_mxfp8_op.register_fake
 def _(x_bf16):
-    x_fp8 = torch.empty_like(x_bf16, dtype=torch.float8_e4m3fn)
+    m, n = x_bf16.shape
+    m_up128 = ((m - 1) // 128) * 128 + 128
+
+    x_fp8 = torch.empty(m_up128, n, device=x_bf16.device, dtype=torch.float8_e4m3fn)
     row_scales = torch.empty(
-        x_bf16.shape[0],
-        x_bf16.shape[1] // 32,
+        m_up128,
+        n // 32,
         device=x_bf16.device,
         dtype=torch.float8_e8m0fnu,
     )
     column_scales = torch.empty(
-        x_bf16.shape[1],
-        x_bf16.shape[0] // 32,
+        n,
+        m_up128 // 32,
         device=x_bf16.device,
         dtype=torch.float8_e8m0fnu,
     )
@@ -355,15 +358,18 @@ def mxfp4_transpose_mxfp8_op(
 
 @mxfp4_transpose_mxfp8_op.register_fake
 def _(x_fp4, scales):
+    m, n = x_fp4.size(0), x_fp4.size(1) * 2
+    m_up128 = ((m - 1) // 128) * 128 + 128
+
     x_fp8 = torch.empty(
-        x_fp4.shape[1] * 2,
-        x_fp4.shape[0],
+        n,
+        m_up128,
         device=x_fp4.device,
         dtype=torch.float8_e4m3fn,
     )
     shared_exps = torch.empty(
-        x_fp4.shape[1] * 2,
-        x_fp4.shape[0] // 32,
+        n,
+        m_up128 // 32,
         device=x_fp4.device,
         dtype=torch.float8_e8m0fnu,
     )
