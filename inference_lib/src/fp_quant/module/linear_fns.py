@@ -314,7 +314,7 @@ class FPQuant4x8MasterFn(Function):
             grad_output_hid_scales,
             weight_t_scales,
             1 / weight_global_scale.float(),
-        )
+        )[: grad_output.shape[0], :]
 
         if x_flat_mask is not None:
             grad_input *= (
