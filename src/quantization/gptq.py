@@ -16,7 +16,7 @@ from .quant_ops import pack_fp4_to_uint8, cast_scales_to_eXmY, ScalePrecision
 from .accumulate_hessian import accumulate_hessian
 from ..transforms.transforms import build_transform, get_transform_matrix
 from ..utils.linalg_utils import inv_sym
-from ..utils.common_utils import to, maybe_first_element
+from ..utils.common_utils import clear_device_cache, to, maybe_first_element
 from ..utils.model_utils import InputCollector, ForwardInterrupt, get_attention_layer, get_mlp_layer, get_number_of_rows_and_cols
 
 try:
@@ -105,7 +105,7 @@ class GPTQ:
         self.W = self.layer.weight
         self.H = None
         self.num_samples = 0
-        torch.cuda.empty_cache()
+        clear_device_cache()
 
     @torch.no_grad()
     def quantization_pre_step(self) -> None:
@@ -383,8 +383,9 @@ def gptq_quantization(
             gptq_handles["mlp.up_proj"].quantizer.global_scale = gate_up_global_scale
 
         # 5. Process calibration data
+        device_type = torch.accelerator.current_accelerator().type if hasattr(torch, "accelerator") else "cuda"
         for inp_args, inp_kwargs in zip(input_args, input_kwargs):
-            with torch.no_grad(), torch.amp.autocast(device_type="cuda", enabled=args.amp):
+            with torch.no_grad(), torch.amp.autocast(device_type=device_type, enabled=args.amp):
                 block(*to(inp_args, device=device), **to(inp_kwargs, device=device))
         # Remove hooks
         for hook in hooks.values():
@@ -443,8 +444,9 @@ def gptq_quantization(
                     }
 
         # 8. Update activations
+        device_type = torch.accelerator.current_accelerator().type if hasattr(torch, "accelerator") else "cuda"
         for inp_args, inp_kwargs in zip(input_args, input_kwargs):
-            with torch.no_grad(), torch.amp.autocast(device_type="cuda", enabled=args.amp):
+            with torch.no_grad(), torch.amp.autocast(device_type=device_type, enabled=args.amp):
                 out = block(*to(inp_args, device=device), **to(inp_kwargs, device=device))
             out = maybe_first_element(out).to(act_offload_device)
             # change only first input argument
@@ -461,10 +463,8 @@ def gptq_quantization(
         # 8. Clean-up
         del gptq_handles
         del hooks
-        gc.collect()
-        torch.cuda.empty_cache()
+        clear_device_cache(garbage_collection=True)
 
-    gc.collect()
-    torch.cuda.empty_cache()
+    clear_device_cache(garbage_collection=True)
 
     return quantized_state_dict, non_quantized_state_dict

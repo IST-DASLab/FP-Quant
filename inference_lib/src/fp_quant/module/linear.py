@@ -151,9 +151,11 @@ class FPQuantLinear(nn.Module):
         assert self.weight.shape[1] % self.config.hadamard_group_size == 0, (
             f"Weight shape must be divisible by hadamard group size: {self.weight.shape[1]} % {self.config.hadamard_group_size} = {self.weight.shape[1] % self.config.hadamard_group_size}"
         )
+
+        weight_in_device = (self.weight.data.device.type in ["cuda", "xpu"])
         if not self.config.pseudoquantization:
-            assert self.weight.data.is_cuda, (
-                f"Weight must be on CUDA, but is on {self.weight.device}"
+            assert weight_in_device, (
+                f"Weight must be on CUDA or XPU, but is on {self.weight.device}"
             )
         if self.config.transform_init == "hadamard":
             transform_init_fn = get_hadamard_matrix

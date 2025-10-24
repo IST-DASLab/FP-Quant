@@ -138,7 +138,7 @@ def sample_chi(d, rng=None, device='cpu'):
         d (int): The degrees of freedom for the Chi distribution. Also determines the shape of the matrix.
         rng (np.random.RandomState or np.random.Generator, optional): 
             A NumPy random number generator for seeding. If None, uses PyTorch's default RNG.
-        device (str or torch.device): The device on which to perform computation ('cpu' or 'cuda').
+        device (str or torch.device): The device on which to perform computation ('cpu', 'cuda' or 'xpu').
 
     Returns:
         torch.Tensor: A 1D tensor of length `d`, where each entry is a sample from Chi(d).
@@ -161,4 +161,4 @@ def sample_chi(d, rng=None, device='cpu'):
     # This gives `d` samples from a Chi distribution with `d` degrees of freedom
     chi_samples = torch.norm(normal_samples, dim=1)
 
-    return chi_samples 
+    return chi_samples
