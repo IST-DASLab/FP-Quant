@@ -232,10 +232,11 @@ class FastFoodTransform(BaseTransform):
         '''
         
         super().__init__()
+        device = torch.accelerator.current_accelerator().type if hasattr(torch, "accelerator") else "cuda"
         sigma = 1 / math.sqrt(2)
         B = torch.diag(torch.randint(0, 2, (group_size,)).float() * 2 - 1)
         G = torch.diag(torch.randn(group_size))
-        H = hadamard_transform(torch.eye(group_size, device='cuda')).cpu()
+        H = hadamard_transform(torch.eye(group_size, device=device)).cpu()
         S = torch.diag((1 / l2norm_along_axis1(G)) *  sample_chi(group_size))
         P = torch.eye(group_size)[torch.randperm(group_size, device='cpu')].to(torch.float32)
         self.block_mat = (1 / sigma) *(1 / math.sqrt(group_size) )*(S@H@G@P@H@B)

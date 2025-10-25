@@ -56,13 +56,15 @@ import torch
 model_name = "ISTA-DASLab/Llama-3.1-8B-Instruct-MR-GPTQ-nvfp"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
+device = torch.accelerator.current_accelerator().type if hasattr(torch, "accelerator") else "cuda"
+
 model = AutoModelForCausalLM.from_pretrained(
     model_name,
-    device_map="cuda",
+    device_map=device,
     torch_dtype=torch.bfloat16,
 )
 prompt = "Explain quantization for neural network in simple terms."
-inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
+inputs = tokenizer(prompt, return_tensors="pt").to(device)
 with torch.inference_mode():
     output_tokens = model.generate(**inputs,max_new_tokens=150 )
 generated_text = tokenizer.decode(output_tokens[0], skip_special_tokens=True)

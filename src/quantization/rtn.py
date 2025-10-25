@@ -9,7 +9,7 @@ from transformers import AutoModelForCausalLM
 from .qlinear import QLinear
 from .quant_ops import pack_fp4_to_uint8, cast_scales_to_eXmY, ScalePrecision
 
-from ..utils.common_utils import to, maybe_first_element
+from ..utils.common_utils import clear_device_cache, to, maybe_first_element
 from ..utils.model_utils import InputCollector, ForwardInterrupt, get_attention_layer, get_mlp_layer
 from ..transforms.transforms import build_transform, get_transform_matrix
 
@@ -150,8 +150,9 @@ def rtn_quantization(
 
         # Calibrate activations (if needed)
         if need_calibration:
+            device_type = torch.accelerator.current_accelerator().type if hasattr(torch, "accelerator") else "cuda"
             for inp_args, inp_kwargs in zip(input_args, input_kwargs):
-                with torch.no_grad(), torch.amp.autocast(device_type="cuda", enabled=args.amp):
+                with torch.no_grad(), torch.amp.autocast(device_type=device_type, enabled=args.amp):
                     block(*to(inp_args, device=device), **to(inp_kwargs, device=device))
 
         
@@ -213,8 +214,9 @@ def rtn_quantization(
         down_in_transform.remove_parametrizations() 
 
         if need_calibration:
+            device_type = torch.accelerator.current_accelerator().type if hasattr(torch, "accelerator") else "cuda"
             for inp_args, inp_kwargs in zip(input_args, input_kwargs):
-                with torch.no_grad(), torch.amp.autocast(device_type="cuda", enabled=args.amp):
+                with torch.no_grad(), torch.amp.autocast(device_type=device_type, enabled=args.amp):
                     out = block(*to(inp_args, device=device), **to(inp_kwargs, device=device))
                 out = maybe_first_element(out).to(act_offload_device)
                 # change only first input argument
@@ -228,10 +230,8 @@ def rtn_quantization(
         if args.cpu_offload_modules:
             block.cpu()
 
-        gc.collect()
-        torch.cuda.empty_cache()        
+        clear_device_cache(garbage_collection=True)
 
-    gc.collect()
-    torch.cuda.empty_cache()
+    clear_device_cache(garbage_collection=True)
 
     return quantized_state_dict, non_quantized_state_dict

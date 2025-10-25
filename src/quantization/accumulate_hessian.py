@@ -127,8 +127,10 @@ def accumulate_hessian(
     assert mat_hessian.is_contiguous() and mat_input.is_contiguous()
     *meta_batch_dims, size_batch, size_hidden = mat_input.shape
     size_meta_batch: int = int(torch.as_tensor(meta_batch_dims).prod())
-    previous_device: torch.device = torch.device(f'cuda:{torch.cuda.current_device()}')
-    torch.cuda.set_device(mat_input.device)
+    device_type = torch.accelerator.current_accelerator().type if hasattr(torch, "accelerator") else "cuda"
+    torch_accelerator_module = getattr(torch, device_type)
+    previous_device: torch.device = torch.device(f'{device_type}:{torch_accelerator_module.current_device()}')
+    torch_accelerator_module.set_device(mat_input.device)
     grid = lambda meta: (
         size_meta_batch
         * triton.cdiv(size_hidden, meta['BLOCK_SIZE_M'])
@@ -142,7 +144,7 @@ def accumulate_hessian(
         compute_lower_only,
         size_meta_batch,
     )
-    torch.cuda.set_device(previous_device)
+    torch_accelerator_module.set_device(previous_device)
     return mat_hessian
 
 

@@ -123,7 +123,7 @@ def nvfp4_forward_kernel_wrapper(
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
 
     # Launch optimized kernel
-    with torch.cuda.device(x.device):
+    with torch.device(x.device):
         nvfp4_forward_kernel[grid](
             x_ptr=x,
             hadamard_matrix_ptr=hadamard_matrix,

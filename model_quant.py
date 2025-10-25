@@ -24,8 +24,9 @@ try:
 except ImportError:
     wandb = None
 
-torch.backends.cuda.matmul.allow_tf32 = False
-torch.backends.cudnn.allow_tf32 = False
+if torch.cuda.is_available():
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
 
 
 def auto_or_int(value):
@@ -347,7 +348,7 @@ def main():
     # Fix seed
     fix_seed(args.seed)
     # Set device
-    device = "cuda"
+    device = torch.accelerator.current_accelerator().type if hasattr(torch, "accelerator") else "cuda"
     # Get dtype
     if args.dtype != "auto":
         args.dtype = getattr(torch, args.dtype)

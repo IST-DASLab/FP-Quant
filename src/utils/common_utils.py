@@ -14,6 +14,15 @@ def fix_seed(seed: int):
     torch.backends.cudnn.deterministic = True
 
 
+def clear_device_cache(garbage_collection=False):
+    if garbage_collection:
+        gc.collect()
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif torch.xpu.is_available():
+        torch.xpu.empty_cache()
+
 def to(data: Any, *args, **kwargs):
     """
     # adopted from https://github.com/Yura52/delu/blob/main/delu/_tensor_ops.py
