@@ -8,4 +8,5 @@ from .utils import (
     FPQuantDtype,
     replace_with_fp_quant_linear,
     replace_quantize_with_fp_quant_linear,
+    finalize_master_weights,
 )
