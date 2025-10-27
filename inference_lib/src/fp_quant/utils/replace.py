@@ -115,3 +115,30 @@ def replace_quantize_with_fp_quant_linear(
         # Remove the last key for recursion
         current_key_name.pop(-1)
     return model
+
+
+def finalize_master_weights(
+    model,
+    current_key_name=None,
+):
+    from ..module import FPQuantLinear
+
+    for name, module in model.named_children():
+        if current_key_name is None:
+            current_key_name = []
+        current_key_name.append(name)
+
+        if isinstance(module, FPQuantLinear):
+            if model._modules[name].config.store_master_weights:
+                model._modules[name].config.store_master_weights = (
+                    False  # all FPQuantLinear share the same config obj
+                )
+            model._modules[name].pre_forward()
+
+        if len(list(module.children())) > 0:
+            finalize_master_weights(
+                model._modules[name],
+                current_key_name=current_key_name,
+            )
+        # Remove the last key for recursion
+        current_key_name.pop(-1)
