@@ -27,7 +27,7 @@ def get_hadamard_matrix(group_size: int, dtype: torch.dtype, device: torch.devic
         dtype=dtype,
         device=device,
         requires_grad=False,
-    ) * (torch.randint(0, 2, (group_size, 1), device=device, dtype=dtype) * 2 - 1)
+    )
 
 
 def get_identity_matrix(group_size: int, dtype: torch.dtype, device: torch.device):

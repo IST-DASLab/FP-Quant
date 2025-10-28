@@ -2,7 +2,7 @@ from setuptools import find_packages, setup
 
 setup(
     name="fp_quant",
-    version="0.3.1",
+    version="0.3.2",
     packages=find_packages(where="src"),
     package_dir={"": "src"},
     author="Andrei Panferov",
