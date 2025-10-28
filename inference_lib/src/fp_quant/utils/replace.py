@@ -69,3 +69,76 @@ def replace_with_fp_quant_linear(
         # Remove the last key for recursion
         current_key_name.pop(-1)
     return model, has_been_replaced
+
+
+def replace_quantize_with_fp_quant_linear(
+    model,
+    fp_quant_linear_config: FPQuantConfig,
+    current_key_name=None,
+    has_been_replaced=False,
+):
+    from ..module import FPQuantLinear
+
+    for name, module in model.named_children():
+        if current_key_name is None:
+            current_key_name = []
+        current_key_name.append(name)
+
+        if isinstance(module, nn.Linear):
+            # Check if the current key is not in the `quantization_config.modules_to_not_convert`
+            current_key_name_str = ".".join(current_key_name)
+            if not any(
+                current_key_name_str.endswith(key)
+                for key in fp_quant_linear_config.modules_to_not_convert
+            ):
+                in_features = module.in_features
+                out_features = module.out_features
+
+                model._modules[name] = FPQuantLinear(
+                    in_features,
+                    out_features,
+                    config=fp_quant_linear_config,
+                    bias=module.bias is not None,
+                    device=module.weight.device,
+                    dtype=module.weight.dtype,
+                )
+                model._modules[name].weight.data = module.weight.data
+                if module.bias is not None:
+                    model._modules[name].bias.data = module.bias.data
+                model._modules[name].pre_forward()
+        if len(list(module.children())) > 0:
+            _ = replace_quantize_with_fp_quant_linear(
+                module,
+                fp_quant_linear_config=fp_quant_linear_config,
+                current_key_name=current_key_name,
+            )
+        # Remove the last key for recursion
+        current_key_name.pop(-1)
+    return model
+
+
+def finalize_master_weights(
+    model,
+    current_key_name=None,
+):
+    from ..module import FPQuantLinear
+
+    for name, module in model.named_children():
+        if current_key_name is None:
+            current_key_name = []
+        current_key_name.append(name)
+
+        if isinstance(module, FPQuantLinear):
+            if model._modules[name].config.store_master_weights:
+                model._modules[name].config.store_master_weights = (
+                    False  # all FPQuantLinear share the same config obj
+                )
+            model._modules[name].pre_forward()
+
+        if len(list(module.children())) > 0:
+            finalize_master_weights(
+                model._modules[name],
+                current_key_name=current_key_name,
+            )
+        # Remove the last key for recursion
+        current_key_name.pop(-1)

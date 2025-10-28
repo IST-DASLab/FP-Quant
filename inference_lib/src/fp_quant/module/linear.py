@@ -6,11 +6,14 @@ from scipy.linalg import hadamard
 
 from ..utils import FPQuantConfig, FPQuantDtype, validate_config
 from .linear_fns import (
-    HAS_QUTLASS,
     FPQuant4x16MasterFn,
+    FPQuant4x4MasterFn,
+    FPQuant4x8MasterFn,
+    FPQuant4x8NoMasterFn,
     FPQuant4x16NoMasterFn,
     forward_quantize,
 )
+from .qutlass_ops import HAS_QUTLASS
 from .pseudoquant_linear_fns import (
     PseudoQuant4x16MasterFn,
     PseudoQuant4x16NoMasterFn,
@@ -20,17 +23,20 @@ from .pseudoquant_linear_fns import (
 
 def get_hadamard_matrix(group_size: int, dtype: torch.dtype, device: torch.device):
     return torch.tensor(
-        hadamard(group_size) * group_size**-0.5, dtype=dtype, device=device
-    )
+        hadamard(group_size) * group_size**-0.5,
+        dtype=dtype,
+        device=device,
+        requires_grad=False,
+    ) * (torch.randint(0, 2, (group_size, 1), device=device, dtype=dtype) * 2 - 1)
 
 
 def get_identity_matrix(group_size: int, dtype: torch.dtype, device: torch.device):
-    return torch.eye(group_size, dtype=dtype, device=device)
+    return torch.eye(group_size, dtype=dtype, device=device, requires_grad=False)
 
 
 def get_gsr_matrix(group_size: int, dtype: torch.dtype, device: torch.device):
     hadamard_matrix = get_hadamard_matrix(group_size, dtype, device)
-    sign_changes = torch.diff(hadamard_matrix, dim=0).ne(0).sum(dim=0) 
+    sign_changes = torch.diff(hadamard_matrix, dim=0).ne(0).sum(dim=0)
     sorted_indices = torch.argsort(sign_changes)
     return hadamard_matrix[:, sorted_indices].contiguous()
 
@@ -148,15 +154,15 @@ class FPQuantLinear(nn.Module):
     @torch.no_grad()
     def pre_forward(self):
         # Generate rotation matrices
-        assert self.weight.shape[1] % self.config.hadamard_group_size == 0, (
-            f"Weight shape must be divisible by hadamard group size: {self.weight.shape[1]} % {self.config.hadamard_group_size} = {self.weight.shape[1] % self.config.hadamard_group_size}"
-        )
+        assert (
+            self.weight.shape[1] % self.config.hadamard_group_size == 0
+        ), f"Weight shape must be divisible by hadamard group size: {self.weight.shape[1]} % {self.config.hadamard_group_size} = {self.weight.shape[1] % self.config.hadamard_group_size}"
 
-        weight_in_device = (self.weight.data.device.type in ["cuda", "xpu"])
+        weight_in_device = self.weight.data.device.type in ["cuda", "xpu"]
         if not self.config.pseudoquantization:
-            assert weight_in_device, (
-                f"Weight must be on CUDA or XPU, but is on {self.weight.device}"
-            )
+            assert (
+                weight_in_device
+            ), f"Weight must be on CUDA or XPU, but is on {self.weight.device}"
         if self.config.transform_init == "hadamard":
             transform_init_fn = get_hadamard_matrix
         elif self.config.transform_init == "identity":
@@ -166,47 +172,49 @@ class FPQuantLinear(nn.Module):
         else:
             raise ValueError(f"Invalid transform init: {self.config.transform_init}")
 
-        self.forward_hadamard_matrix = nn.Parameter(
+        self.forward_hadamard_matrix = nn.Buffer(
             transform_init_fn(
                 self.config.hadamard_group_size,
                 self.weight.dtype,
                 self.weight.device,
             ),
-            requires_grad=False,
         )
-        self.backward_hadamard_matrix = nn.Parameter(
+        self.backward_hadamard_matrix = nn.Buffer(
             transform_init_fn(
                 self.config.hadamard_group_size,
                 self.weight.dtype,
                 self.weight.device,
             ),
-            requires_grad=False,
         )
 
-        if self.config.forward_dtype == FPQuantDtype.MXFP4:
-            # MXFP4 quantization implicitly multiplies by 3.0
-            self.weight_global_scale = nn.Parameter(
-                torch.tensor([3.0], dtype=self.weight.dtype, device=self.weight.device),
-                requires_grad=False,
-            )
-            self.act_global_scale = nn.Parameter(
-                torch.tensor([3.0], dtype=self.weight.dtype, device=self.weight.device),
-                requires_grad=False,
-            )
+        if (
+            self.config.forward_dtype == FPQuantDtype.MXFP4
+            and self.config.forward_method == "quest"
+        ):
+            global_scale_val = 1.0
+        elif self.config.forward_method == "abs_max":
+            # MXFP4 abs_max quantization implicitly multiplies by 3.0
+            global_scale_val = 3.0
         elif self.config.forward_dtype == FPQuantDtype.NVFP4:
-            # MXFP4 quantization implicitly multiplies by 6.0
-            self.weight_global_scale = nn.Parameter(
-                torch.tensor(
-                    [10.0], dtype=self.weight.dtype, device=self.weight.device
-                ),
+            # 10.0 ensures no underflows/overflows in most models
+            global_scale_val = 10.0
+
+        self.weight_global_scale = nn.Buffer(
+            torch.tensor(
+                [global_scale_val],
+                dtype=self.weight.dtype,
+                device=self.weight.device,
                 requires_grad=False,
-            )
-            self.act_global_scale = nn.Parameter(
-                torch.tensor(
-                    [10.0], dtype=self.weight.dtype, device=self.weight.device
-                ),
+            ),
+        )
+        self.act_global_scale = nn.Buffer(
+            torch.tensor(
+                [global_scale_val],
+                dtype=self.weight.dtype,
+                device=self.weight.device,
                 requires_grad=False,
-            )
+            ),
+        )
 
         if self.config.store_master_weights:
             self.qweight = None
@@ -241,6 +249,55 @@ class FPQuantLinear(nn.Module):
 
     def forward(self, x) -> torch.Tensor:
         if (
+            self.config.forward_dtype == FPQuantDtype.MXFP4
+            and self.config.backward_dtype == FPQuantDtype.MXFP4
+            and self.config.store_master_weights == True
+            and self.config.pseudoquantization == False
+        ):
+            return FPQuant4x4MasterFn.apply(
+                x,
+                self.weight,
+                self.weight_global_scale,
+                self.act_global_scale,
+                self.bias,
+                self.forward_hadamard_matrix,
+                self.config.forward_dtype,
+                self.config.forward_method,
+            )
+        elif (
+            self.config.forward_dtype == FPQuantDtype.MXFP4
+            and self.config.backward_dtype == FPQuantDtype.MXFP8
+            and self.config.store_master_weights == True
+            and self.config.pseudoquantization == False
+        ):
+            return FPQuant4x8MasterFn.apply(
+                x,
+                self.weight,
+                self.weight_global_scale,
+                self.act_global_scale,
+                self.bias,
+                self.forward_hadamard_matrix,
+                self.config.forward_dtype,
+                self.config.forward_method,
+            )
+        elif (
+            self.config.forward_dtype == FPQuantDtype.MXFP4
+            and self.config.backward_dtype == FPQuantDtype.MXFP8
+            and self.config.store_master_weights == False
+            and self.config.pseudoquantization == False
+        ):
+            return FPQuant4x8NoMasterFn.apply(
+                x,
+                self.qweight,
+                self.scales,
+                self.weight_global_scale,
+                self.act_global_scale,
+                self.bias,
+                self.forward_hadamard_matrix,
+                self.config.forward_dtype,
+                self.config.forward_method,
+            )
+        elif (
             self.config.forward_dtype in (FPQuantDtype.MXFP4, FPQuantDtype.NVFP4)
             and self.config.backward_dtype == FPQuantDtype.BF16
             and self.config.store_master_weights == True
