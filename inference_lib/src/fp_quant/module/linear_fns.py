@@ -15,8 +15,6 @@ from .qutlass_ops import (
     matmul_mxf4_bf16_tn_op,
     matmul_nvf4_bf16_tn_op,
     matmul_mxf8_bf16_tn_op,
-    matmul_mxf8_bf16_nt_op,
-    matmul_mxf8_bf16_tt_op,
     matmul_mxf8_bf16_nn_op,
     # Backward quantization
     backward_t_bf16_op,
