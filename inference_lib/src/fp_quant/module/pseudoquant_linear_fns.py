@@ -152,8 +152,6 @@ class PseudoQuant4x16NoMasterFn(Function):
         y = torch.nn.functional.linear(x_flat_dq, weight_dq, bias)
 
         y = y.unflatten(dim=0, sizes=x.shape[:-1])
-        if bias is not None:
-            y += bias
 
         ctx.x_shape = x.shape
         ctx.dtype = dtype
